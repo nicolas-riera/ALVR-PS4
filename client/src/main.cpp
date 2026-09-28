@@ -31,7 +31,7 @@
 #include "tracker.h"
 #include "video.h"
 
-#define ALVR_PS4_VERSION "0.8.0"
+#define ALVR_PS4_VERSION "0.8.1"
 
 static char g_ip[16] = "?";
 

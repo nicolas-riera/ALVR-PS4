@@ -635,10 +635,12 @@ bool video_want_idr()
 {
     pthread_mutex_lock(&g_lock);
     uint64_t t = now_us();
-    // A new need is sent at most every 100 ms (the streamer's minimum IDR interval); while
-    // frames are still dropped waiting for the IDR, ask again every 500 ms (lost request).
+    // The streamer sends DecoderConfig only in reply to RequestIdr, so the first request
+    // goes out before any configuration exists. A new need is sent at most every 100 ms
+    // (the streamer's minimum IDR interval); while frames are still dropped waiting for the
+    // configuration or the IDR, ask again every 500 ms (lost request).
     uint64_t since = t - g_last_idr_request_us;
-    bool want = g_config_len && ((g_want_idr && since >= 100000) || (g_wait_idr && since >= 500000));
+    bool want = (g_want_idr && since >= 100000) || ((g_wait_idr || !g_config_len) && since >= 500000);
     if (want) {
         g_want_idr = false;
         g_last_idr_request_us = t;
