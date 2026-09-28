@@ -1,5 +1,6 @@
 #include "video.h"
 
+#include <emmintrin.h>
 #include <pthread.h>
 #include <string.h>
 
@@ -146,9 +147,21 @@ static void *g_compute_queue;
 static void *g_decoder;
 static unsigned g_decoder_gen;
 static uint32_t g_dec_w, g_dec_h;
-static void *g_frame_buffers[2];
+static const int FRAME_BUFFERS = 3; // being decoded into, waiting for conversion, being converted
+static void *g_frame_buffers[FRAME_BUFFERS];
 static uint64_t g_frame_buffer_size;
-static int g_fb_cur;
+
+// Decoded picture handed from the decode thread to the conversion thread.
+struct Decoded {
+    int fb;
+    uint32_t width, height, pitch;
+    uint64_t timestamp_ns;
+};
+static pthread_mutex_t g_dec_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_dec_cond = PTHREAD_COND_INITIALIZER;
+static Decoded g_pending;
+static bool g_has_pending;
+static int g_converting_fb = -1;
 
 // Eye buffers.
 static uint32_t *g_eye_mem[EYE_SETS][2];
@@ -196,7 +209,69 @@ struct ConvertJob {
 
 static inline uint32_t clamp8(int v) { return v < 0 ? 0 : v > 255 ? 255 : (uint32_t)v; }
 
+static void convert_scalar(const ConvertJob &j);
+
+// SSE2, 8 pixels of two rows per iteration, 16-bit fixed point with 6 fractional bits.
+// Products take the high half of (v << 8) * (c * 16384), which is v * c * 64.
+// Coefficients of 2.0 and more do not fit in int16: they are halved and the product doubled.
 static void convert(const ConvertJob &j)
+{
+    if (j.w % 8 || j.x0 % 2) {
+        convert_scalar(j);
+        return;
+    }
+    int16_t ys, yo, rv, gu, gv, bu_half;
+    if (j.full_range) {
+        ys = 16384; yo = 0; rv = 25802; gu = 3069; gv = 7669; bu_half = 15201;       // 1.0, 1.5748, 0.1873, 0.4681, 1.8556/2
+    } else {
+        ys = 19071; yo = 16; rv = 29377; gu = 3490; gv = 8733; bu_half = 17302;      // 1.164, 1.793, 0.213, 0.533, 2.112/2
+    }
+    const __m128i zero = _mm_setzero_si128();
+    const __m128i c128 = _mm_set1_epi16(128), cyo = _mm_set1_epi16(yo);
+    const __m128i cys = _mm_set1_epi16(ys), crv = _mm_set1_epi16(rv), cgu = _mm_set1_epi16(gu),
+                  cgv = _mm_set1_epi16(gv), cbu = _mm_set1_epi16(bu_half);
+    const __m128i round = _mm_set1_epi16(32);
+    const __m128i alpha = _mm_set1_epi8((char)0x80); // same alpha as the lobby
+    for (uint32_t row = 0; row < j.h; row += 2) {
+        const uint8_t *y0 = j.y + (size_t)row * j.pitch + j.x0;
+        const uint8_t *y1 = row + 1 < j.h ? y0 + j.pitch : y0;
+        const uint8_t *uvp = j.uv + (size_t)(row / 2) * j.pitch + j.x0;
+        uint32_t *d0 = j.dst + (size_t)row * j.dst_pitch;
+        uint32_t *d1 = row + 1 < j.h ? d0 + j.dst_pitch : d0;
+        for (uint32_t x = 0; x < j.w; x += 8) {
+            // Chroma of 8 pixels: 4 (U, V) pairs, each shared by 2 pixels.
+            __m128i uv = _mm_unpacklo_epi8(_mm_loadl_epi64((const __m128i *)(uvp + x)), zero);
+            uv = _mm_sub_epi16(uv, c128);                                  // U0 V0 U1 V1 ...
+            __m128i u = _mm_srai_epi32(_mm_slli_epi32(uv, 16), 16);         // 4 x i32
+            __m128i v = _mm_srai_epi32(uv, 16);
+            u = _mm_packs_epi32(u, u);
+            v = _mm_packs_epi32(v, v);
+            u = _mm_slli_epi16(_mm_unpacklo_epi16(u, u), 8);               // U0 U0 U1 U1 .. << 8
+            v = _mm_slli_epi16(_mm_unpacklo_epi16(v, v), 8);
+            __m128i cr = _mm_mulhi_epi16(v, crv);
+            __m128i cg = _mm_add_epi16(_mm_mulhi_epi16(u, cgu), _mm_mulhi_epi16(v, cgv));
+            __m128i cb = _mm_slli_epi16(_mm_mulhi_epi16(u, cbu), 1);
+            for (int r = 0; r < 2; r++) {
+                const uint8_t *yp = r ? y1 : y0;
+                // Luma: (Y - offset) << 8 needs 16 unsigned bits, hence the unsigned multiply
+                // (Y below the limited-range black level saturates to 0).
+                __m128i yv = _mm_unpacklo_epi8(_mm_loadl_epi64((const __m128i *)(yp + x)), zero);
+                yv = _mm_mulhi_epu16(_mm_slli_epi16(_mm_subs_epu16(yv, cyo), 8), cys);
+                yv = _mm_add_epi16(yv, round);
+                __m128i R = _mm_srai_epi16(_mm_adds_epi16(yv, cr), 6);
+                __m128i G = _mm_srai_epi16(_mm_subs_epi16(yv, cg), 6);
+                __m128i B = _mm_srai_epi16(_mm_adds_epi16(yv, cb), 6);
+                __m128i b8 = _mm_packus_epi16(B, B), g8 = _mm_packus_epi16(G, G), r8 = _mm_packus_epi16(R, R);
+                __m128i bg = _mm_unpacklo_epi8(b8, g8), ra = _mm_unpacklo_epi8(r8, alpha);
+                uint32_t *d = r ? d1 : d0;
+                _mm_storeu_si128((__m128i *)(d + x), _mm_unpacklo_epi16(bg, ra));
+                _mm_storeu_si128((__m128i *)(d + x + 4), _mm_unpackhi_epi16(bg, ra));
+            }
+        }
+    }
+}
+
+static void convert_scalar(const ConvertJob &j)
 {
     // Fixed point, 16 fractional bits.
     int ys, yo, rv, gu, gv, bu;
@@ -363,9 +438,10 @@ static bool create_decoder(uint32_t width, uint32_t height)
         cpu_gpu_size = cpu_gpu_mem ? mem.cpu_gpu_memory_size : 0;
     }
     if (mem.max_frame_buffer_size > g_frame_buffer_size) {
-        for (int i = 0; i < 2; i++)
-            g_frame_buffers[i] = alloc_direct(mem.max_frame_buffer_size, 0x10000, MEM_ONION, "frame buffer");
-        g_frame_buffer_size = g_frame_buffers[0] && g_frame_buffers[1] ? mem.max_frame_buffer_size : 0;
+        bool all = true;
+        for (int i = 0; i < FRAME_BUFFERS; i++)
+            all = (g_frame_buffers[i] = alloc_direct(mem.max_frame_buffer_size, 0x10000, MEM_ONION, "frame buffer")) && all;
+        g_frame_buffer_size = all ? mem.max_frame_buffer_size : 0;
     }
     if ((mem.cpu_memory_size && !cpu_mem) || (mem.gpu_memory_size && !gpu_mem) ||
         (mem.cpu_gpu_memory_size && !cpu_gpu_mem) || !g_frame_buffer_size)
@@ -394,7 +470,7 @@ static void request_idr_locked()
     g_want_idr = true;
 }
 
-static void decode_one(Slot &s, bool more_pending, const uint8_t *config, size_t config_len)
+static void decode_one(Slot &s, const uint8_t *config, size_t config_len)
 {
     // IDR frames get the SPS/PPS put back in front of them (the streamer strips them).
     const uint8_t *au = s.mem + CONFIG_MAX;
@@ -410,9 +486,16 @@ static void decode_one(Slot &s, bool more_pending, const uint8_t *config, size_t
     in.au_size = au_len;
     in.pts = in.dts = s.timestamp_ns;
     in.attached = s.received_us;
+    // A frame buffer that is neither waiting for conversion nor being converted.
+    int fb_index = 0;
+    pthread_mutex_lock(&g_dec_lock);
+    while (fb_index < FRAME_BUFFERS - 1 &&
+           ((g_has_pending && fb_index == g_pending.fb) || fb_index == g_converting_fb))
+        fb_index++;
+    pthread_mutex_unlock(&g_dec_lock);
     Vdec2FrameBuffer fb{};
     fb.this_size = sizeof(fb);
-    fb.frame_buffer = g_frame_buffers[g_fb_cur];
+    fb.frame_buffer = g_frame_buffers[fb_index];
     fb.frame_buffer_size = g_frame_buffer_size;
     Vdec2OutputInfo out{};
     out.this_size = sizeof(out);
@@ -439,58 +522,77 @@ static void decode_one(Slot &s, bool more_pending, const uint8_t *config, size_t
     g_stats.decoded++;
     g_stats.decode_us_avg = (g_stats.decode_us_avg * 15 + (t1 - t0)) / 16;
     pthread_mutex_unlock(&g_lock);
-    // With a newer frame already waiting, this one is only decoded (it is a reference),
-    // unless nothing was shown for 25 ms: a decoder that stays behind must not freeze the
-    // picture (conversion costs ~2 ms).
-    static uint64_t last_publish_us;
-    if (!out.is_valid || (more_pending && t1 - last_publish_us < 25000))
+    if (!out.is_valid)
         return;
-    last_publish_us = t1;
-    g_fb_cur ^= 1;
+    // Hand the picture to the conversion thread; an older one it has not started is
+    // replaced (its frame buffer becomes free again). Decoding and conversion overlap.
+    pthread_mutex_lock(&g_dec_lock);
+    g_pending = Decoded{fb_index, out.frame_width, out.frame_height,
+                        out.frame_pitch_in_bytes ? out.frame_pitch_in_bytes : out.frame_pitch, s.timestamp_ns};
+    g_has_pending = true;
+    pthread_cond_signal(&g_dec_cond);
+    pthread_mutex_unlock(&g_dec_lock);
+}
 
-    uint32_t fw = out.frame_width, fh = out.frame_height;
-    uint32_t pitch = out.frame_pitch_in_bytes ? out.frame_pitch_in_bytes : out.frame_pitch;
-    uint32_t eye_w = g_view_w, eye_h = g_view_h;
-    if (eye_w * 2 > fw)
-        eye_w = fw / 2;
-    if (eye_h > fh)
-        eye_h = fh;
-    if (!alloc_eye_buffers(eye_w, eye_h))
-        return;
-    int w;
-    pthread_mutex_lock(&g_pub_lock);
-    for (w = 0; w < EYE_SETS; w++)
-        if (w != g_published && w != g_displayed && w != g_prev_displayed)
-            break;
-    pthread_mutex_unlock(&g_pub_lock);
-    const uint8_t *y = (const uint8_t *)out.frame_buffer;
-    const uint8_t *uv = y + (size_t)pitch * fh;
-    ConvertJob left{y, uv, pitch, 0, eye_w & ~1u, eye_h, g_eye_mem[w][0], g_eye_pitch, g_full_range};
-    ConvertJob right = left;
-    right.x0 = eye_w;
-    right.dst = g_eye_mem[w][1];
-    uint64_t t2 = now_us();
-    pthread_mutex_lock(&g_job_lock);
-    g_job = right;
-    unsigned gen = ++g_job_gen;
-    pthread_cond_broadcast(&g_job_cond);
-    pthread_mutex_unlock(&g_job_lock);
-    convert(left);
-    pthread_mutex_lock(&g_job_lock);
-    while (g_job_done != gen)
-        pthread_cond_wait(&g_job_cond, &g_job_lock);
-    pthread_mutex_unlock(&g_job_lock);
-    uint64_t t3 = now_us();
+// Conversion thread: NV12 of the newest decoded picture -> BGRA eye buffers (left eye
+// here, right eye on the helper thread), then publication to the render loop.
+static void *convert_main_thread(void *)
+{
+    for (;;) {
+        pthread_mutex_lock(&g_dec_lock);
+        while (!g_has_pending)
+            pthread_cond_wait(&g_dec_cond, &g_dec_lock);
+        Decoded d = g_pending;
+        g_has_pending = false;
+        g_converting_fb = d.fb;
+        pthread_mutex_unlock(&g_dec_lock);
 
-    pthread_mutex_lock(&g_pub_lock);
-    g_published = w;
-    g_pub_ts = s.timestamp_ns;
-    g_pub_decoded_us = t3;
-    g_pub_seq++;
-    pthread_mutex_unlock(&g_pub_lock);
-    pthread_mutex_lock(&g_lock);
-    g_stats.convert_us_avg = (g_stats.convert_us_avg * 15 + (t3 - t2)) / 16;
-    pthread_mutex_unlock(&g_lock);
+        uint32_t eye_w = g_view_w, eye_h = g_view_h;
+        if (eye_w * 2 > d.width)
+            eye_w = d.width / 2;
+        if (eye_h > d.height)
+            eye_h = d.height;
+        if (alloc_eye_buffers(eye_w, eye_h)) {
+            int w;
+            pthread_mutex_lock(&g_pub_lock);
+            for (w = 0; w < EYE_SETS; w++)
+                if (w != g_published && w != g_displayed && w != g_prev_displayed)
+                    break;
+            pthread_mutex_unlock(&g_pub_lock);
+            const uint8_t *y = (const uint8_t *)g_frame_buffers[d.fb];
+            const uint8_t *uv = y + (size_t)d.pitch * d.height;
+            ConvertJob left{y, uv, d.pitch, 0, eye_w & ~1u, eye_h, g_eye_mem[w][0], g_eye_pitch, g_full_range};
+            ConvertJob right = left;
+            right.x0 = eye_w;
+            right.dst = g_eye_mem[w][1];
+            uint64_t t0 = now_us();
+            pthread_mutex_lock(&g_job_lock);
+            g_job = right;
+            unsigned gen = ++g_job_gen;
+            pthread_cond_broadcast(&g_job_cond);
+            pthread_mutex_unlock(&g_job_lock);
+            convert(left);
+            pthread_mutex_lock(&g_job_lock);
+            while (g_job_done != gen)
+                pthread_cond_wait(&g_job_cond, &g_job_lock);
+            pthread_mutex_unlock(&g_job_lock);
+            uint64_t t1 = now_us();
+
+            pthread_mutex_lock(&g_pub_lock);
+            g_published = w;
+            g_pub_ts = d.timestamp_ns;
+            g_pub_decoded_us = t1;
+            g_pub_seq++;
+            pthread_mutex_unlock(&g_pub_lock);
+            pthread_mutex_lock(&g_lock);
+            g_stats.convert_us_avg = (g_stats.convert_us_avg * 15 + (t1 - t0)) / 16;
+            pthread_mutex_unlock(&g_lock);
+        }
+        pthread_mutex_lock(&g_dec_lock);
+        g_converting_fb = -1;
+        pthread_mutex_unlock(&g_dec_lock);
+    }
+    return nullptr;
 }
 
 static void *decode_thread(void *)
@@ -522,11 +624,8 @@ static void *decode_thread(void *)
                 g_decoder_gen = gen; // do not retry every frame; a new DecoderConfig retries
             }
         }
-        pthread_mutex_lock(&g_lock);
-        bool more = g_count > 1;
-        pthread_mutex_unlock(&g_lock);
         if (ok && g_decoder)
-            decode_one(s, more, config, config_len);
+            decode_one(s, config, config_len);
         pthread_mutex_lock(&g_lock);
         // The slot is released only now: its memory was in use until the decode returned.
         if (g_count > 0) {
@@ -568,6 +667,7 @@ bool video_init(int module)
     pthread_t t;
     pthread_create(&t, nullptr, decode_thread, nullptr);
     pthread_create(&t, nullptr, convert_thread, nullptr);
+    pthread_create(&t, nullptr, convert_main_thread, nullptr);
     LOG("video: ready");
     return true;
 }
