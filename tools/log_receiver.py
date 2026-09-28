@@ -8,7 +8,7 @@ import os
 import socket
 import sys
 
-port = int(sys.argv[1]) if len(sys.argv) > 1 else 9944
+port = int(sys.argv[1]) if len(sys.argv) > 1 else 9950  # 9943/9944 belong to ALVR
 os.makedirs(os.path.join(os.path.dirname(__file__), "..", "logs"), exist_ok=True)
 path = os.path.join(os.path.dirname(__file__), "..", "logs",
                     datetime.datetime.now().strftime("ps4-%Y%m%d-%H%M%S.log"))

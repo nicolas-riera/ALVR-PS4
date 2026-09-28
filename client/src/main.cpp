@@ -4,6 +4,7 @@
 // probes the system modules the later stages depend on (Hmd, VrTracker, Move,
 // Camera, video decoder, audio) so we know what loads from a homebrew process.
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -20,6 +21,7 @@
 
 #include "hmd.h"
 #include "lobby.h"
+#include "alvr_client.h"
 #include "config.h"
 #include "move.h"
 #include "wand.h"
@@ -28,7 +30,7 @@
 #include "screen.h"
 #include "tracker.h"
 
-#define ALVR_PS4_VERSION "0.6.2"
+#define ALVR_PS4_VERSION "0.7.0"
 
 static char g_ip[16] = "?";
 
@@ -113,6 +115,8 @@ static WandEmulator g_wand_emu[MOVE_MAX];
 static WandInput g_wand[MOVE_MAX];
 static ClientConfig g_config;
 static bool g_floor_set = false; // cleared by a tracking reset: the tracker origin may move
+static float g_floor_y = -1.4f;   // tracker-space floor height, shared with the ALVR uplink
+static void start_alvr();
 
 static void start_headset()
 {
@@ -133,6 +137,7 @@ static void start_headset()
         LOG("tracker start FAILED");
     move_start(g_probes[2].handle, g_user_id, g_moves);
     tracker_run_thread();
+    start_alvr();
 
     // The DualShock 4 is not used: not registered with the tracker, light bar reset
     // to the system's generic colour.
@@ -199,7 +204,7 @@ static void poll_system_events()
 // system compositor together with the pose it was rendered for.
 static bool render_lobby(Screen *s)
 {
-    static float floor_y = -1.4f;
+    float &floor_y = g_floor_y;
     const TrackerPose &tp = g_tracker.device_pose;
     if (!g_floor_set && g_tracker.status == 1 && g_tracker.position_quality == 9) {
         floor_y = tp.py - 1.3f; // seated height guess until a proper floor calibration exists
@@ -255,7 +260,23 @@ static bool render_lobby(Screen *s)
     // Info panel, once, far in front (towards the camera, 3 m beyond it).
     static char info_lines[5][96];
     snprintf(info_lines[0], sizeof(info_lines[0]), "ALVR PS4");
-    snprintf(info_lines[1], sizeof(info_lines[1]), "Waiting for the PC (ALVR streamer %s)", ALVR_STREAMER_VERSION);
+    AlvrStatus st;
+    alvr_get_status(&st);
+    switch (st.state) {
+    case ALVR_DISCOVERY:
+        snprintf(info_lines[1], sizeof(info_lines[1]), "Waiting for the PC (ALVR streamer %s)", ALVR_STREAMER_VERSION);
+        break;
+    case ALVR_HANDSHAKE:
+        snprintf(info_lines[1], sizeof(info_lines[1]), "Connecting to %s...", st.server_ip);
+        break;
+    case ALVR_RESTARTING:
+        snprintf(info_lines[1], sizeof(info_lines[1]), "SteamVR is restarting on %s...", st.server_ip);
+        break;
+    case ALVR_STREAMING:
+        snprintf(info_lines[1], sizeof(info_lines[1]), "Connected to %s (%ux%u, %.0f Hz) - %u video packets",
+                 st.server_ip, st.view_width, st.view_height, st.refresh_rate, st.video_packets);
+        break;
+    }
     snprintf(info_lines[2], sizeof(info_lines[2]), "Hostname: %s", g_config.hostname);
     snprintf(info_lines[3], sizeof(info_lines[3]), "IP: %s", g_ip);
     snprintf(info_lines[4], sizeof(info_lines[4]), "Client v%s", ALVR_PS4_VERSION);
@@ -333,6 +354,84 @@ static bool render_lobby(Screen *s)
     }
     cur ^= 1;
     return ok;
+}
+
+// ---- ALVR uplink -------------------------------------------------------------------
+
+static void haptics_to_move(int hand, float duration_s, float frequency, float amplitude)
+{
+    (void)frequency;
+    // ALVR hand 0 = left, 1 = right; Move index 0 is the right hand.
+    int index = hand == 1 ? 0 : 1;
+    float a = amplitude < 0 ? 0 : amplitude > 1 ? 1 : amplitude;
+    uint32_t ms = (uint32_t)(duration_s * 1000.0f);
+    move_vibrate(&g_moves[index], (uint8_t)(a * 255.0f), ms < 10 ? 10 : ms);
+}
+
+static void start_alvr()
+{
+    AlvrViews views;
+    views.ipd_m = 0.063f;
+    const HmdFieldOfView &f = g_hmd.fov;
+    // OpenXR angle convention: left and down negative.
+    const float l[2] = {f.tan_out, f.tan_in}, r[2] = {f.tan_in, f.tan_out};
+    for (int e = 0; e < 2; e++) {
+        views.fov[e][0] = -atanf(l[e]);
+        views.fov[e][1] = atanf(r[e]);
+        views.fov[e][2] = atanf(f.tan_top);
+        views.fov[e][3] = -atanf(f.tan_bottom);
+    }
+    alvr_start(g_config.hostname, &views, haptics_to_move);
+}
+
+// Tracker space (origin at the PS Camera, +Y up, user looking at -Z) to ALVR stage space
+// (same axes, origin on the floor).
+static void to_stage(const float p[3], const float q[4], AlvrDeviceMotion *m)
+{
+    m->present = true;
+    m->position[0] = p[0];
+    m->position[1] = p[1] - g_floor_y;
+    m->position[2] = p[2];
+    for (int i = 0; i < 4; i++)
+        m->orientation[i] = q[i];
+    memset(m->linear_velocity, 0, sizeof(m->linear_velocity));
+    memset(m->angular_velocity, 0, sizeof(m->angular_velocity));
+}
+
+static void send_alvr_uplink()
+{
+    AlvrDeviceMotion head, hands[2];
+    // Head: centre between the eyes, orientation of the headset (always sent).
+    const TrackerPose &l = g_tracker.eye_pose[0], &r = g_tracker.eye_pose[1], &d = g_tracker.device_pose;
+    bool eyes = l.qw * l.qw + l.qx * l.qx + l.qy * l.qy + l.qz * l.qz > 0.5f;
+    float hp[3] = {eyes ? (l.px + r.px) * 0.5f : d.px, eyes ? (l.py + r.py) * 0.5f : d.py,
+                   eyes ? (l.pz + r.pz) * 0.5f : d.pz};
+    float hq[4] = {eyes ? l.qx : d.qx, eyes ? l.qy : d.qy, eyes ? l.qz : d.qz, eyes ? l.qw : d.qw};
+    to_stage(hp, hq, &head);
+    const uint64_t now = sceKernelGetProcessTime();
+    for (int i = 0; i < MOVE_MAX; i++) {
+        const MoveController &m = g_moves[i];
+        int hand = move_index_hand(i) == HAND_LEFT ? 0 : 1;
+        AlvrDeviceMotion &hm = hands[hand];
+        to_stage(m.track.position, m.track.orientation, &hm);
+        // Lost controllers keep their last pose for 10 s, then are omitted, which is how
+        // the 20.14.1 protocol reports a controller that is not tracked.
+        hm.present = m.connected && m.track.has_position && m.track.last_seen_us &&
+                     now - m.track.last_seen_us <= TRACKER_CONTROLLER_SEARCHING_US;
+        const WandInput &w = g_wand[i];
+        AlvrHandInput in;
+        in.trackpad_touch = w.pad_touch;
+        in.trackpad_click = w.pad_click;
+        in.trackpad_x = w.pad_x;
+        in.trackpad_y = w.pad_y;
+        in.grip = w.grip;
+        in.menu = w.menu;
+        in.system = w.system;
+        in.trigger = w.trigger;
+        in.trigger_click = w.trigger_click;
+        alvr_update_input(hand, &in);
+    }
+    alvr_send_tracking(now * 1000ull, &head, &hands[0], &hands[1]);
 }
 
 static void draw(Screen *s, unsigned frame)
@@ -427,6 +526,7 @@ int main()
                     w.pad_click ? "+click" : "", w.pad_x, w.pad_y, w.grip, w.menu, w.system, w.trigger,
                     w.trigger_click ? " (click)" : "");
         }
+        send_alvr_uplink();
         if (screen.handle > 0 && reproj_active()) {
             // 3D lobby once the tracker has given an orientation; the 2D status screen is
             // only shown before that. Afterwards the lobby keeps the last pose (the quality

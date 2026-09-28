@@ -4,7 +4,7 @@
 // (received on the PC by tools/log_receiver.py), and to an in-memory ring
 // buffer that the on-screen console draws.
 
-#define LOG_UDP_PORT 9944
+#define LOG_UDP_PORT 9950 // 9943/9944 are used by ALVR
 #define LOG_RING_LINES 40
 #define LOG_LINE_MAX 150
 
