@@ -1,0 +1,14 @@
+client/build/
+client/eboot.bin
+client/pkg.gp4
+client/sce_sys/param.sfo
+client/*.pkg
+logs/
+dumps/
+# Third-party / derived material kept locally only
+reference/shadps4-src/
+reference/decomp/
+tools/re/ghidra/projects/
+tools/fontgen/*.ttf
+*.args
+__pycache__/
