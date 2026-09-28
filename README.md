@@ -79,6 +79,22 @@ Button mappings: for `left` and `right`, each source maps to one destination wit
 | `thumbstick/click` | `trackpad/click` |
 | `thumbstick/touch` | `trackpad/touch` |
 
+### Driver patch: keep "menu" separate from "system"
+
+The ALVR 20.14.1 SteamVR driver hard-wires every controller's menu button to both the
+Vive **application menu** and **system** inputs (`Paths.cpp`), so the PS Move menu buttons
+(left □, right △) would also open the SteamVR dashboard. No setting can change this.
+`tools/alvr_driver_patch.py` changes one byte per hand in `driver_alvr_server.dll`, so that
+menu only feeds the application menu. START is then the only system button.
+
+```
+python tools\alvr_driver_patch.py "C:\path\to\alvr_streamer_windows\bin\win64\driver_alvr_server.dll"
+```
+
+The script waits until SteamVR is closed, because the DLL is locked while it runs. It checks
+that the DLL really is 20.14.1 and keeps the original as `driver_alvr_server.dll.orig`.
+Run it with `--undo` to restore the original. Run it again after reinstalling ALVR.
+
 ### Recommended: disable unused SteamVR add-ons
 
 When the PS4 connects, the ALVR driver gives SteamVR only 1 second to activate each
@@ -138,6 +154,7 @@ as "searching" after 10 s. When the headset is lost, SteamVR shows it as "search
 | Controllers greyed out / "standby" in SteamVR | Controller activation timed out: disable unused SteamVR add-ons, then restart SteamVR |
 | SteamVR shows Oculus Touch controllers or wrong bindings | Missing `InputProfilePathString` extra OpenVR prop |
 | START does nothing | Button mappings not applied (run `tools/alvr_setup.py`) |
+| Menu (□ / △) also opens the SteamVR dashboard | Driver patch not applied (run `tools/alvr_driver_patch.py`) |
 | Wand drawn ahead of the Move | Controller position offset not set to 0, 0, 0 |
 | The lobby stays although "Connected" | The codec must be H264. Look at the PS4 logs (below) for `video:` lines |
 
@@ -165,6 +182,7 @@ OpenSSL 1.1 in `~/ps4/libssl11` (PkgTool needs it; Debian 13 no longer ships it)
 | `client/src/lobby.*` | software-rendered lobby |
 | `docs/alvr-20.14.1-protocol.md` | the ALVR 20.14.1 wire protocol, as implemented |
 | `tools/alvr_setup.py` | PC-side ALVR settings for this client |
+| `tools/alvr_driver_patch.py` | ALVR 20.14.1 driver fix: menu button no longer presses system |
 | `tools/re/` | reverse-engineering helpers (headless Ghidra on dumped system modules) |
 
 The PS4 client's settings are stored in `/data/alvr-ps4/config.txt` on the console
