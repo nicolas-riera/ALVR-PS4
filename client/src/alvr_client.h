@@ -7,6 +7,7 @@
 
 enum AlvrState {
     ALVR_DISCOVERY,  // announcing, waiting for the streamer to connect
+    ALVR_WAITING,    // streamer found; refusing it until SteamVR has loaded all its drivers
     ALVR_HANDSHAKE,  // control socket open, negotiating
     ALVR_RESTARTING, // streamer asked to restart SteamVR; will reconnect
     ALVR_STREAMING,  // stream started

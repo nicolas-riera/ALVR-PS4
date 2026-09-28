@@ -30,7 +30,7 @@
 #include "screen.h"
 #include "tracker.h"
 
-#define ALVR_PS4_VERSION "0.7.4"
+#define ALVR_PS4_VERSION "0.7.5"
 
 static char g_ip[16] = "?";
 
@@ -265,6 +265,9 @@ static bool render_lobby(Screen *s)
     switch (st.state) {
     case ALVR_DISCOVERY:
         snprintf(info_lines[1], sizeof(info_lines[1]), "Waiting for the PC (ALVR streamer %s)", ALVR_STREAMER_VERSION);
+        break;
+    case ALVR_WAITING:
+        snprintf(info_lines[1], sizeof(info_lines[1]), "PC found (%s), waiting for SteamVR...", st.server_ip);
         break;
     case ALVR_HANDSHAKE:
         snprintf(info_lines[1], sizeof(info_lines[1]), "Connecting to %s...", st.server_ip);

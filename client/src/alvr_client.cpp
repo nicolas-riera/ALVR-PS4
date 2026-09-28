@@ -570,6 +570,14 @@ static void *net_thread(void *)
             subnet.sin_addr.s_addr = (ip.s_addr & htonl(0xffffff00)) | htonl(0xff);
         }
     }
+    // The streamer registers the controllers at the end of the handshake and gives SteamVR
+    // only 1 s to activate each one; if that times out, the controller never gets a pose
+    // and stays greyed in SteamVR. Right after SteamVR starts, the streamer connects while
+    // SteamVR is still loading the other drivers (activation then took ~2 s), so the first
+    // connection after a period without session is refused for HOLDOFF_US; the streamer
+    // retries every second on its own.
+    const uint64_t HOLDOFF_US = 6000000;
+    uint64_t holdoff_until = 0; // 0: armed, the next connection starts the holdoff
     uint64_t last_announce = 0;
     unsigned announces = 0;
     for (;;) {
@@ -581,13 +589,34 @@ static void *net_thread(void *)
                 LOG("alvr: announce #%u -> 255.255.255.255: %d, subnet: %d", announces, (int)r1, (int)r2);
             last_announce = t;
         }
+        if (holdoff_until != 0 && t > holdoff_until + 5000000) {
+            holdoff_until = 0; // the streamer stopped retrying (SteamVR closed): re-arm
+            set_state(ALVR_DISCOVERY);
+        }
         if (!readable(listener, 100))
             continue;
         sockaddr_in peer{};
         socklen_t plen = sizeof(peer);
         int fd = accept(listener, (sockaddr *)&peer, &plen);
         if (fd >= 0) {
+            uint64_t now = now_us();
+            if (holdoff_until == 0 || now < holdoff_until) {
+                if (holdoff_until == 0) {
+                    holdoff_until = now + HOLDOFF_US;
+                    char ip[16];
+                    inet_ntop(AF_INET, &peer.sin_addr, ip, sizeof(ip));
+                    pthread_mutex_lock(&g_lock);
+                    snprintf(g_status.server_ip, sizeof(g_status.server_ip), "%s", ip);
+                    pthread_mutex_unlock(&g_lock);
+                    set_state(ALVR_WAITING);
+                    LOG("alvr: streamer %s found, letting SteamVR load for %u s", ip,
+                        (unsigned)(HOLDOFF_US / 1000000));
+                }
+                close(fd);
+                continue;
+            }
             run_session(fd, peer.sin_addr.s_addr);
+            holdoff_until = 0; // SteamVR may restart (or be restarted) before the next session
             if (g_status.state == ALVR_RESTARTING) {
                 sceKernelUsleep(1000000);
                 set_state(ALVR_DISCOVERY);
