@@ -22,6 +22,22 @@ void gnm_texture_linear_bgra(GnmTexture *t, const void *base, uint32_t width, ui
 bool reproj_start(int hmd_module, int videoout_handle, int first_index);
 // Shows a 2D image on the floating screen of the system VR mode.
 int reproj_submit_2d(const GnmTexture *tex);
+// Render pose handed to sceHmdReprojectionStart (layout partly inferred, see reproj.cpp).
+struct ReprojPose {
+    uint64_t timestamp;   // tracker timestamp of the pose used for rendering (us)
+    uint32_t status;
+    float orientation[4]; // x, y, z, w (tracker space)
+    uint32_t pad0;
+    float position[4];    // x, y, z, 0 (tracker space, metres)
+    uint32_t unk30;
+    uint32_t pad1;
+};
+
+// Shows a stereo frame. Both eyes may point at the same side-by-side texture,
+// each with its own uv transform (scale x, scale y, offset x, offset y).
+int reproj_submit_stereo(const GnmTexture *left, const GnmTexture *right, const float uv_left[4],
+                         const float uv_right[4], const ReprojPose *pose);
+
 // Stops reprojection and releases the display buffers.
 void reproj_stop();
 bool reproj_active();

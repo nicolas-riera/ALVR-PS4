@@ -33,6 +33,32 @@ struct Reproj2dParam {
     uint64_t zero[4];
 };
 
+// sceHmdReprojectionStart parameter (16 qwords). libSceHmd checks [0], [1], [2], [7]
+// non-null, [7] 8-aligned, [8] in 2000..6999, [10] < 2, [0xb] & ~0xf0000000f == 0,
+// [0xc..0xf] zero. The stereo mesh builder (0x94c0) copies T#s from [0] and [1],
+// a sampler from [2], and per-eye 16-byte uv transforms from [3..4] and [5..6].
+struct ReprojStereoParam {
+    const GnmTexture *left;
+    const GnmTexture *right;
+    const void *sampler;
+    float uv_left[4];
+    float uv_right[4];
+    void *label;
+    uint32_t time_us;
+    uint32_t pad;
+    uint64_t unk9;
+    uint32_t mode; // < 2
+    uint32_t pad2;
+    uint64_t flags;
+    uint64_t zero[4];
+};
+
+// Pose: the builder reads a u64 at +0, a u32 at +8, 16 bytes at +0xc, 16 bytes at
+// +0x20 and a u32 at +0x30. Orientation at +0xc is the working hypothesis.
+static_assert(sizeof(ReprojPose) == 0x38, "ReprojPose size");
+static_assert(__builtin_offsetof(ReprojPose, orientation) == 0xc, "ReprojPose orientation");
+static_assert(__builtin_offsetof(ReprojPose, position) == 0x20, "ReprojPose position");
+static_assert(sizeof(ReprojStereoParam) == 0x80, "ReprojStereoParam size");
 static_assert(sizeof(ReprojInitParam) == 0x38, "ReprojInitParam size");
 static_assert(sizeof(Reproj2dParam) == 0x50, "Reproj2dParam size");
 
@@ -41,6 +67,9 @@ typedef int (*PFN_Initialize)(const ReprojInitParam *, uint32_t type, void *rese
 typedef int (*PFN_SetDisplayBuffers)(int32_t videoout, int32_t index_a, int32_t index_b, void *reserved);
 typedef int (*PFN_Start2dVr)(const Reproj2dParam *, uint64_t frame, void *reserved);
 typedef int (*PFN_Void)();
+typedef int (*PFN_Start)(const ReprojStereoParam *, const ReprojPose *, uint64_t frame, void *reserved);
+
+static PFN_Start p_start;
 
 static PFN_Start2dVr p_start_2d;
 static PFN_Void p_stop, p_finalize;
@@ -123,6 +152,7 @@ bool reproj_start(int module, int videoout, int first_index)
     auto initialize = (PFN_Initialize)resolve(module, "sceHmdReprojectionInitialize");
     auto set_display_buffers = (PFN_SetDisplayBuffers)resolve(module, "sceHmdReprojectionSetDisplayBuffers");
     p_start_2d = (PFN_Start2dVr)resolve(module, "sceHmdReprojectionStart2dVr");
+    p_start = (PFN_Start)resolve(module, "sceHmdReprojectionStart");
     p_stop = (PFN_Void)resolve(module, "sceHmdReprojectionStop");
     p_finalize = (PFN_Void)resolve(module, "sceHmdReprojectionFinalize");
     p_unset_display_buffers = (int (*)())resolve(module, "sceHmdReprojectionUnsetDisplayBuffers");
@@ -187,6 +217,29 @@ int reproj_submit_2d(const GnmTexture *tex)
     int rc = p_start_2d(&p, g_frame++, nullptr);
     if (rc != last_rc) {
         LOG("sceHmdReprojectionStart2dVr -> 0x%08x (frame %llu)", (unsigned)rc, (unsigned long long)g_frame);
+        last_rc = rc;
+    }
+    return rc;
+}
+
+int reproj_submit_stereo(const GnmTexture *left, const GnmTexture *right, const float uv_left[4],
+                         const float uv_right[4], const ReprojPose *pose)
+{
+    if (!g_active || !p_start)
+        return -1;
+    ReprojStereoParam p;
+    memset(&p, 0, sizeof(p));
+    p.left = left;
+    p.right = right;
+    p.sampler = g_sampler;
+    memcpy(p.uv_left, uv_left, sizeof(p.uv_left));
+    memcpy(p.uv_right, uv_right, sizeof(p.uv_right));
+    p.label = g_label;
+    p.time_us = 3000;
+    static int last_rc = 1;
+    int rc = p_start(&p, pose, g_frame++, nullptr);
+    if (rc != last_rc) {
+        LOG("sceHmdReprojectionStart -> 0x%08x (frame %llu)", (unsigned)rc, (unsigned long long)g_frame);
         last_rc = rc;
     }
     return rc;

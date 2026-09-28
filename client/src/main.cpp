@@ -18,12 +18,13 @@
 #include <orbis/UserService.h>
 
 #include "hmd.h"
+#include "lobby.h"
 #include "reproj.h"
 #include "log.h"
 #include "screen.h"
 #include "tracker.h"
 
-#define ALVR_PS4_VERSION "0.3.5 (stage 3)"
+#define ALVR_PS4_VERSION "0.4.0 (stage 3: 3D lobby)"
 
 static char g_ip[16] = "?";
 
@@ -177,6 +178,45 @@ static void poll_system_events()
     }
 }
 
+// Stereo lobby, rendered in software into the side-by-side buffer and handed to the
+// system compositor together with the pose it was rendered for.
+static bool render_lobby(Screen *s)
+{
+    static float floor_y = -1.3f;
+    static bool floor_set = false;
+    const TrackerPose &tp = g_tracker.device_pose;
+    if (!floor_set && g_tracker.status == 1 && g_tracker.position_quality == 9) {
+        floor_y = tp.py - 1.2f; // seated height guess until a proper floor calibration exists
+        floor_set = true;
+        LOG("lobby: floor set at y=%.3f (head y=%.3f)", floor_y, tp.py);
+    }
+    LobbyView view;
+    view.head_pos = v3(tp.px, tp.py, tp.pz);
+    view.head_rot = Quat{tp.qx, tp.qy, tp.qz, tp.qw};
+    view.ipd = 0.063f;
+    const HmdFieldOfView &f = g_hmd.fov;
+    view.fov[0] = EyeFov{f.tan_out, f.tan_in, f.tan_top, f.tan_bottom};
+    view.fov[1] = EyeFov{f.tan_in, f.tan_out, f.tan_top, f.tan_bottom};
+    view.floor_y = floor_y;
+    lobby_render(s->buffers[s->cur], s->width, s->height, s->width, &view);
+
+    static GnmTexture tex[2];
+    gnm_texture_linear_bgra(&tex[s->cur], s->buffers[s->cur], s->width, s->height, s->width);
+    static const float uv_left[4] = {0.5f, 1.0f, 0.0f, 0.0f};
+    static const float uv_right[4] = {0.5f, 1.0f, 0.5f, 0.0f};
+    ReprojPose pose;
+    memset(&pose, 0, sizeof(pose));
+    pose.timestamp = g_tracker.timestamp;
+    pose.orientation[0] = tp.qx;
+    pose.orientation[1] = tp.qy;
+    pose.orientation[2] = tp.qz;
+    pose.orientation[3] = tp.qw;
+    pose.position[0] = tp.px;
+    pose.position[1] = tp.py;
+    pose.position[2] = tp.pz;
+    return reproj_submit_stereo(&tex[s->cur], &tex[s->cur], uv_left, uv_right, &pose) == 0;
+}
+
 static void draw(Screen *s, unsigned frame)
 {
     screen_fill(s, 0x101820);
@@ -251,12 +291,17 @@ int main()
 
     unsigned frame = 0;
     for (;;) {
+        tracker_update(&g_tracker);
         if (screen.handle > 0 && reproj_active()) {
-            draw(&screen, frame);
-            static GnmTexture tex[2];
-            gnm_texture_linear_bgra(&tex[screen.cur], screen.buffers[screen.cur], screen.width, screen.height,
-                                    screen.width);
-            reproj_submit_2d(&tex[screen.cur]);
+            // 3D lobby once the tracker has an orientation, 2D status screen before that.
+            bool stereo = g_tracker.results_ok && g_tracker.orientation_quality != 0 && render_lobby(&screen);
+            if (!stereo) {
+                draw(&screen, frame);
+                static GnmTexture tex[2];
+                gnm_texture_linear_bgra(&tex[screen.cur], screen.buffers[screen.cur], screen.width, screen.height,
+                                        screen.width);
+                reproj_submit_2d(&tex[screen.cur]);
+            }
             // Once an app uses the GPU (reprojection, tracker compute) the system relies on
             // sceGnmSubmitDone as its safe point to suspend or close it. Without it, closing
             // the app hangs, then ends in CE-34878-0.
@@ -277,7 +322,6 @@ int main()
         }
         if (frame % 30 == 0)
             poll_system_events();
-        tracker_update(&g_tracker);
         if (frame % 60 == 30 && g_tracker.results_ok) {
             const TrackerPose &p = g_tracker.device_pose;
             LOG("pose q=(%+.4f %+.4f %+.4f %+.4f) p=(%+.4f %+.4f %+.4f) ts=%llu", p.qx, p.qy, p.qz, p.qw,
