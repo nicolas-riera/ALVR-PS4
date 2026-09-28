@@ -22,13 +22,15 @@ void gnm_texture_linear_bgra(GnmTexture *t, const void *base, uint32_t width, ui
 bool reproj_start(int hmd_module, int videoout_handle, int first_index);
 // Shows a 2D image on the floating screen of the system VR mode.
 int reproj_submit_2d(const GnmTexture *tex);
-// Render pose handed to sceHmdReprojectionStart (layout partly inferred, see reproj.cpp).
+// Render pose handed to sceHmdReprojectionStart. Layout from libSceHmd's warp code
+// (0x98a0 reads floats 0..2 as position, 3..6 as quaternion x,y,z,w, and compares
+// the u64 at +0x20 with the current pose timestamp).
 struct ReprojPose {
-    uint64_t timestamp;   // tracker timestamp of the pose used for rendering (us)
-    uint32_t status;
+    float position[3];    // tracker space, metres
     float orientation[4]; // x, y, z, w (tracker space)
     uint32_t pad0;
-    float position[4];    // x, y, z, 0 (tracker space, metres)
+    uint64_t timestamp;   // tracker timestamp of the pose used for rendering (us)
+    uint64_t unk28;
     uint32_t unk30;
     uint32_t pad1;
 };

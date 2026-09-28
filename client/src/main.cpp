@@ -24,7 +24,7 @@
 #include "screen.h"
 #include "tracker.h"
 
-#define ALVR_PS4_VERSION "0.4.2 (stage 3: 3D lobby)"
+#define ALVR_PS4_VERSION "0.4.3 (stage 3: 3D lobby)"
 
 static char g_ip[16] = "?";
 

@@ -55,11 +55,9 @@ struct ReprojStereoParam {
     uint64_t zero[4];
 };
 
-// Pose: the builder reads a u64 at +0, a u32 at +8, 16 bytes at +0xc, 16 bytes at
-// +0x20 and a u32 at +0x30. Orientation at +0xc is the working hypothesis.
 static_assert(sizeof(ReprojPose) == 0x38, "ReprojPose size");
 static_assert(__builtin_offsetof(ReprojPose, orientation) == 0xc, "ReprojPose orientation");
-static_assert(__builtin_offsetof(ReprojPose, position) == 0x20, "ReprojPose position");
+static_assert(__builtin_offsetof(ReprojPose, timestamp) == 0x20, "ReprojPose timestamp");
 static_assert(sizeof(ReprojStereoParam) == 0x80, "ReprojStereoParam size");
 static_assert(sizeof(ReprojInitParam) == 0x38, "ReprojInitParam size");
 static_assert(sizeof(Reproj2dParam) == 0x50, "Reproj2dParam size");
