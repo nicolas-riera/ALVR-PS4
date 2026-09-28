@@ -12,7 +12,7 @@
 // Button bits of MoveData.buttons, mapped on hardware from logged presses.
 enum MoveButton : uint16_t {
     MOVE_BUTTON_SELECT = 0x0001, // used by the system for screenshots: never bind it
-    MOVE_BUTTON_T = 0x0002,      // trigger fully pressed (analog value in MoveController.trigger)
+    MOVE_BUTTON_T = 0x0002,      // trigger touched (set from ~16 % travel; analog value in MoveController.trigger)
     MOVE_BUTTON_MOVE = 0x0004,
     MOVE_BUTTON_START = 0x0008,
     MOVE_BUTTON_TRIANGLE = 0x0010,

@@ -56,6 +56,7 @@ void wand_update(WandEmulator *emu, Hand hand, const MoveController &move, WandI
     out->menu = (b & menu_btn) != 0;
     out->system = (b & MOVE_BUTTON_START) != 0;
     out->trigger = move.trigger / 255.0f;
-    out->trigger_click = (b & MOVE_BUTTON_T) != 0;
+    // The T bit is set from ~16 % of the travel, so the click comes from the analog value.
+    out->trigger_click = out->trigger >= 0.9f;
     emu->last = *out;
 }

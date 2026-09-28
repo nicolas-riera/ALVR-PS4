@@ -683,6 +683,15 @@ void alvr_send_tracking(uint64_t timestamp_ns, const AlvrDeviceMotion *head, con
     for (int i = 0; i < 7; i++)
         w.u8(0); // hand skeletons x2, eye gazes x2, face expressions x3: None
     stream_send(STREAM_TRACKING, buf, w.len);
+    static uint64_t last_log = 0;
+    if (timestamp_ns - last_log > 5000000000ull) {
+        last_log = timestamp_ns;
+        LOG("alvr: tracking #%u: head p=(%.2f %.2f %.2f), left %s p=(%.2f %.2f %.2f), right %s p=(%.2f %.2f %.2f)",
+            g_tx_index[STREAM_TRACKING], head->position[0], head->position[1], head->position[2],
+            left && left->present ? "sent" : "omitted", left ? left->position[0] : 0, left ? left->position[1] : 0,
+            left ? left->position[2] : 0, right && right->present ? "sent" : "omitted",
+            right ? right->position[0] : 0, right ? right->position[1] : 0, right ? right->position[2] : 0);
+    }
 }
 
 static void queue_button(uint64_t id, bool scalar, float value)
