@@ -29,8 +29,9 @@
 #include "log.h"
 #include "screen.h"
 #include "tracker.h"
+#include "video.h"
 
-#define ALVR_PS4_VERSION "0.7.5"
+#define ALVR_PS4_VERSION "0.8.0"
 
 static char g_ip[16] = "?";
 
@@ -137,6 +138,8 @@ static void start_headset()
         LOG("tracker start FAILED");
     move_start(g_probes[2].handle, g_user_id, g_moves);
     tracker_run_thread();
+    if (!video_init(g_probes[5].handle))
+        LOG("video decoder unavailable");
     start_alvr();
 
     // The DualShock 4 is not used: not registered with the tracker, light bar reset
@@ -198,6 +201,121 @@ static void poll_system_events()
             break;
         LOG("system event type=0x%x", ev.type);
     }
+}
+
+// Per-eye block for the compositor: tangent -> uv transform,
+//   uv = tangent * scale + offset   (x right, y down),
+// stored as {scale x, scale y, offset x, offset y}. Deduced from three captures
+// (image size varied inversely with the scale, right edge at -0.22 as predicted).
+static void compute_fov_blocks(const EyeFov fov[2], float block[2][4])
+{
+    for (int eye = 0; eye < 2; eye++) {
+        const EyeFov &e = fov[eye];
+        const float w = e.tan_left + e.tan_right, h = e.tan_up + e.tan_down;
+        block[eye][0] = 1.0f / w;
+        block[eye][1] = 1.0f / h;
+        block[eye][2] = e.tan_left / w;
+        block[eye][3] = e.tan_up / h;
+    }
+}
+
+// Headset FoV per eye, as declared to the streamer in start_alvr().
+static void headset_fov(EyeFov fov[2])
+{
+    const HmdFieldOfView &f = g_hmd.fov;
+    fov[0] = EyeFov{f.tan_out, f.tan_in, f.tan_top, f.tan_bottom};
+    fov[1] = EyeFov{f.tan_in, f.tan_out, f.tan_top, f.tan_bottom};
+}
+
+// Poses sent to the streamer, by tracking timestamp: a video frame carries the timestamp
+// of the pose SteamVR rendered it with, and the compositor needs that pose to reproject.
+struct SentPose {
+    uint64_t timestamp_ns;
+    ReprojPose pose;
+};
+static SentPose g_sent_poses[256];
+static unsigned g_sent_pose_next;
+
+static void remember_sent_pose(uint64_t timestamp_ns)
+{
+    const TrackerPose &tp = g_tracker.device_pose;
+    SentPose &s = g_sent_poses[g_sent_pose_next++ % 256];
+    memset(&s, 0, sizeof(s));
+    s.timestamp_ns = timestamp_ns;
+    s.pose.timestamp = g_tracker.timestamp;
+    s.pose.orientation[0] = tp.qx;
+    s.pose.orientation[1] = tp.qy;
+    s.pose.orientation[2] = tp.qz;
+    s.pose.orientation[3] = tp.qw;
+    s.pose.position[0] = tp.px;
+    s.pose.position[1] = tp.py;
+    s.pose.position[2] = tp.pz;
+}
+
+static bool find_sent_pose(uint64_t timestamp_ns, ReprojPose *out)
+{
+    const SentPose *best = nullptr;
+    uint64_t best_diff = ~0ull;
+    for (const SentPose &s : g_sent_poses) {
+        if (!s.timestamp_ns)
+            continue;
+        uint64_t diff = s.timestamp_ns > timestamp_ns ? s.timestamp_ns - timestamp_ns : timestamp_ns - s.timestamp_ns;
+        if (diff < best_diff) {
+            best_diff = diff;
+            best = &s;
+        }
+    }
+    if (!best || best_diff > 100000000ull) // more than 100 ms away: not ours
+        return false;
+    *out = best->pose;
+    return true;
+}
+
+// Streamed frame: shown through the compositor with the pose it was rendered for.
+// Returns false (lobby shown instead) until frames arrive, or after 1.5 s without one.
+static bool render_video()
+{
+    VideoFrame vf;
+    if (!video_latest(&vf) || sceKernelGetProcessTime() - vf.decoded_us > 1500000)
+        return false;
+    ReprojPose pose;
+    if (!find_sent_pose(vf.timestamp_ns, &pose)) {
+        // Unknown timestamp (0 = the streamer found no match): current pose, no warp.
+        const TrackerPose &tp = g_tracker.device_pose;
+        memset(&pose, 0, sizeof(pose));
+        pose.timestamp = g_tracker.timestamp;
+        pose.orientation[0] = tp.qx;
+        pose.orientation[1] = tp.qy;
+        pose.orientation[2] = tp.qz;
+        pose.orientation[3] = tp.qw;
+        pose.position[0] = tp.px;
+        pose.position[1] = tp.py;
+        pose.position[2] = tp.pz;
+    }
+    EyeFov fov[2];
+    headset_fov(fov);
+    float fov_block[2][4];
+    compute_fov_blocks(fov, fov_block);
+    bool ok = reproj_submit_stereo(vf.eye[0], vf.eye[1], fov_block[0], fov_block[1], &pose) == 0;
+    static uint64_t stat_start;
+    static unsigned last_seq, shown;
+    if (vf.seq != last_seq) {
+        shown++;
+        last_seq = vf.seq;
+    }
+    uint64_t now = sceKernelGetProcessTime();
+    if (!stat_start)
+        stat_start = now;
+    if (now - stat_start >= 5000000) {
+        VideoStats vs;
+        video_get_stats(&vs);
+        LOG("video: shown %.1f fps | received %u decoded %u dropped %u errors %u | decode %.2f ms convert %.2f ms",
+            shown * 1e6 / (double)(now - stat_start), vs.received, vs.decoded, vs.dropped, vs.errors,
+            vs.decode_us_avg / 1000.0, vs.convert_us_avg / 1000.0);
+        stat_start = now;
+        shown = 0;
+    }
+    return ok;
 }
 
 // Stereo lobby, rendered in software into the side-by-side buffer and handed to the
@@ -314,19 +432,8 @@ static bool render_lobby(Screen *s)
         lobby_render_eye(eye_buf[cur][eye], eye_w, eye_h, eye_w, &view, eye);
         gnm_texture_linear_bgra(&eye_tex[cur][eye], eye_buf[cur][eye], eye_w, eye_h, eye_w);
     }
-    // Per-eye block for the compositor: tangent -> uv transform,
-    //   uv = tangent * scale + offset   (x right, y down),
-    // stored as {scale x, scale y, offset x, offset y}. Deduced from three captures
-    // (image size varied inversely with the scale, right edge at -0.22 as predicted).
     float fov_block[2][4];
-    for (int eye = 0; eye < 2; eye++) {
-        const EyeFov &e = view.fov[eye];
-        const float w = e.tan_left + e.tan_right, h = e.tan_up + e.tan_down;
-        fov_block[eye][0] = 1.0f / w;
-        fov_block[eye][1] = 1.0f / h;
-        fov_block[eye][2] = e.tan_left / w;
-        fov_block[eye][3] = e.tan_up / h;
-    }
+    compute_fov_blocks(view.fov, fov_block);
     ReprojPose pose;
     memset(&pose, 0, sizeof(pose));
     pose.timestamp = g_tracker.timestamp;
@@ -434,6 +541,7 @@ static void send_alvr_uplink()
         in.trigger_click = w.trigger_click;
         alvr_update_input(hand, &in);
     }
+    remember_sent_pose(now * 1000ull);
     alvr_send_tracking(now * 1000ull, &head, &hands[0], &hands[1]);
 }
 
@@ -512,15 +620,18 @@ int main()
     for (;;) {
         tracker_update(&g_tracker);
         move_update(g_moves);
+        AlvrStatus alvr_st;
+        alvr_get_status(&alvr_st);
+        bool pc_connected = alvr_st.state == ALVR_STREAMING;
         for (int i = 0; i < MOVE_MAX; i++) {
             WandInput prev = g_wand_emu[i].last;
             wand_update(&g_wand_emu[i], move_index_hand(i), g_moves[i], &g_wand[i]);
             const WandInput &w = g_wand[i];
-            // Lobby haptics feedback (until ALVR drives the motors): a tick on pad click
-            // and grip, a longer buzz on a full trigger pull.
-            if ((w.pad_click && !prev.pad_click) || (w.grip && !prev.grip))
+            // Lobby haptics feedback, only while no PC is connected (then ALVR drives the
+            // motors): a tick on pad click and grip, a longer buzz on a full trigger pull.
+            if (!pc_connected && ((w.pad_click && !prev.pad_click) || (w.grip && !prev.grip)))
                 move_vibrate(&g_moves[i], 150, 40);
-            if (w.trigger >= 0.9f && prev.trigger < 0.9f)
+            if (!pc_connected && w.trigger >= 0.9f && prev.trigger < 0.9f)
                 move_vibrate(&g_moves[i], 220, 120);
             if (w.pad_click != prev.pad_click || w.grip != prev.grip || w.menu != prev.menu ||
                 w.system != prev.system || w.trigger_click != prev.trigger_click)
@@ -537,7 +648,9 @@ int main()
             static bool lobby_started = false;
             if (g_tracker.results_ok && g_tracker.orientation_quality != 0)
                 lobby_started = true;
-            bool stereo = lobby_started && render_lobby(&screen);
+            bool stereo = pc_connected && render_video();
+            if (!stereo)
+                stereo = lobby_started && render_lobby(&screen);
             if (!stereo) {
                 draw(&screen, frame);
                 static GnmTexture tex[2];

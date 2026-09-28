@@ -17,6 +17,7 @@
 
 #include "bincode.h"
 #include "log.h"
+#include "video.h"
 
 // ---------------------------------------------------------------------------------------
 // Constants (docs/alvr-20.14.1-protocol.md)
@@ -205,12 +206,76 @@ static void stream_send(uint16_t stream, const uint8_t *data, size_t len)
     pthread_mutex_unlock(&g_stream_send_lock);
 }
 
-// Minimal reassembly: single-shard packets are handled directly (haptics); multi-shard
-// packets (video) are counted for now, decoding comes with the video decoder.
+// Video packet reassembly (docs section 1.4): one packet in flight; a shard of a newer
+// packet abandons an incomplete one. Any gap in packet indices is a loss, after which
+// frames are dropped until the next IDR (P-frames would reference missing data).
+static const size_t VIDEO_MAX_PACKET = 3 << 20;
+static const uint32_t VIDEO_MAX_SHARDS = 4096;
+static uint8_t *g_vbuf;
+static uint8_t g_vhave[VIDEO_MAX_SHARDS];
+static bool g_vactive, g_vhave_last;
+static uint32_t g_vindex, g_vshards, g_vgot, g_vlast;
+static size_t g_vlen;
+
+static void video_reassembly_reset()
+{
+    g_vactive = false;
+    g_vhave_last = false;
+}
+
+static void video_shard(uint32_t index, uint32_t shards, uint32_t shard, const uint8_t *chunk, size_t chunk_len)
+{
+    const size_t d = (size_t)g_packet_size + 4 - SHARD_PREFIX;
+    if (!g_vbuf)
+        g_vbuf = (uint8_t *)malloc(VIDEO_MAX_PACKET);
+    if (!g_vbuf || shards == 0 || shards > VIDEO_MAX_SHARDS || shard >= shards || chunk_len > d ||
+        (size_t)shards * d > VIDEO_MAX_PACKET)
+        return;
+    if (g_vhave_last && (int32_t)(index - g_vlast) <= 0)
+        return; // already delivered or older
+    if (!g_vactive || index != g_vindex) {
+        if (g_vactive && (int32_t)(index - g_vindex) < 0)
+            return; // late shard of an abandoned packet
+        g_vactive = true;
+        g_vindex = index;
+        g_vshards = shards;
+        g_vgot = 0;
+        g_vlen = 0;
+        memset(g_vhave, 0, shards);
+    }
+    if (shards != g_vshards || g_vhave[shard])
+        return;
+    g_vhave[shard] = 1;
+    g_vgot++;
+    memcpy(g_vbuf + shard * d, chunk, chunk_len);
+    if (shard == shards - 1)
+        g_vlen = shard * d + chunk_len;
+    if (g_vgot < g_vshards)
+        return;
+    g_vactive = false;
+    bool loss = g_vhave_last && index != g_vlast + 1;
+    g_vhave_last = true;
+    g_vlast = index;
+    if (loss)
+        video_packet_loss();
+    // VideoPacketHeader { timestamp: Duration (u64 secs, u32 nanos), is_idr: bool }
+    if (g_vlen < 13)
+        return;
+    uint64_t secs;
+    uint32_t nanos;
+    memcpy(&secs, g_vbuf, 8);
+    memcpy(&nanos, g_vbuf + 8, 4);
+    bool idr = g_vbuf[12] != 0;
+    video_push_frame(secs * 1000000000ull + nanos, idr, g_vbuf + 13, g_vlen - 13);
+    pthread_mutex_lock(&g_lock);
+    g_status.video_packets++;
+    pthread_mutex_unlock(&g_lock);
+}
+
 static void stream_poll()
 {
     uint8_t pkt[4096];
-    for (int n = 0; n < 256 && readable(g_stream, 0); n++) {
+    for (int n = 0; n < 512 && readable(g_stream, 0); n++) {
         ssize_t r = recv(g_stream, pkt, sizeof(pkt), 0);
         if (r < SHARD_PREFIX)
             return;
@@ -229,10 +294,8 @@ static void stream_poll()
                 if (hand >= 0)
                     g_haptics(hand, dur_ns / 1e9f, freq, amp);
             }
-        } else if (stream == STREAM_VIDEO && shard == 0) {
-            pthread_mutex_lock(&g_lock);
-            g_status.video_packets++;
-            pthread_mutex_unlock(&g_lock);
+        } else if (stream == STREAM_VIDEO) {
+            video_shard(get_be32(pkt + 6), shards, shard, chunk, chunk_len);
         }
     }
 }
@@ -419,6 +482,12 @@ static void run_session(int fd, uint32_t server_ip_be)
             sscanf(v, "[%u,%u]", &vw, &vh);
         if (const char *v = json_find(neg, nlen, "refresh_rate_hint"))
             fps = strtof(v, nullptr);
+        bool full_range = true;
+        if (const char *v = json_find(neg, nlen, "use_full_range"))
+            full_range = strncmp(v, "true", 4) == 0;
+        video_reset();
+        video_reassembly_reset();
+        video_set_stream(vw, vh, full_range);
         LOG("alvr: packet_size=%d stream_port=%d protocol=%s view=%ux%u fps=%.1f", g_packet_size, stream_port,
             udp ? "UDP" : "TCP (unsupported)", vw, vh, fps);
         pthread_mutex_lock(&g_lock);
@@ -488,7 +557,16 @@ static void run_session(int fd, uint32_t server_ip_be)
                 last_tx = t;
             }
             flush_buttons();
-            len = control_recv(&buf, &cap, 4000); // 4 ms: also paces this loop
+            if (video_want_idr()) {
+                control_send_unit(C_REQUEST_IDR);
+                LOG("alvr: IDR requested");
+            }
+            // Wait for either socket (4 ms max, which also paces this loop).
+            pollfd fds[2] = {{g_control, POLLIN, 0}, {g_stream, POLLIN, 0}};
+            poll(fds, 2, 4);
+            len = 0;
+            if (fds[0].revents & (POLLIN | POLLHUP | POLLERR))
+                len = control_recv(&buf, &cap, 100000); // a started message completes quickly
             if (len < 0) {
                 LOG("alvr: control socket closed");
                 break;
@@ -501,7 +579,15 @@ static void run_session(int fd, uint32_t server_ip_be)
                     set_state(ALVR_RESTARTING);
                     break;
                 } else if (variant == S_DECODER_CONFIG) {
-                    LOG("alvr: DecoderConfig received (%ld bytes)", len);
+                    // DecoderInitializationConfig { codec: CodecType (u32), config_buffer: Vec<u8> }
+                    BinReader rd{buf + 4, (size_t)len - 4, 0, false};
+                    uint32_t codec = rd.u32();
+                    uint64_t clen;
+                    const uint8_t *cfg = rd.blob(&clen);
+                    if (!rd.error)
+                        video_set_decoder_config(codec, cfg, (size_t)clen);
+                    else
+                        LOG("alvr: bad DecoderConfig (%ld bytes)", len);
                 }
             }
             if (now_us() - last_rx > KEEPALIVE_TIMEOUT_US) {
@@ -523,6 +609,7 @@ end:
     pthread_mutex_lock(&g_stream_send_lock);
     close_fd(&g_stream);
     pthread_mutex_unlock(&g_stream_send_lock);
+    video_reset();
     LOG("alvr: disconnected");
     if (g_status.state != ALVR_RESTARTING)
         set_state(ALVR_DISCOVERY);
