@@ -5,6 +5,7 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -25,6 +26,13 @@ static const uint64_t KEEPALIVE_INTERVAL_US = 500000;
 static const uint64_t KEEPALIVE_TIMEOUT_US = 2000000;
 static const uint64_t HANDSHAKE_TIMEOUT_US = 2000000;
 static const int SHARD_PREFIX = 18;
+
+// OpenOrbis' MSG_* flags use values that mean something else to the PS4's FreeBSD
+// kernel (its MSG_DONTWAIT is FreeBSD's MSG_WAITALL): no send/recv flags are used,
+// sockets are made non-blocking with fcntl instead. SO_NOSIGPIPE is FreeBSD's value.
+#ifndef SO_NOSIGPIPE
+#define SO_NOSIGPIPE 0x0800
+#endif
 
 enum StreamId : uint16_t { STREAM_TRACKING = 0, STREAM_HAPTICS = 1, STREAM_AUDIO = 2, STREAM_VIDEO = 3, STREAM_STATS = 4 };
 
@@ -81,7 +89,7 @@ static bool send_all(int fd, const void *p, size_t n)
 {
     const uint8_t *b = (const uint8_t *)p;
     while (n) {
-        ssize_t r = send(fd, b, n, 0);
+        ssize_t r = send(fd, b, n, 0); // SIGPIPE is ignored (see alvr_start)
         if (r <= 0)
             return false;
         b += r;
@@ -192,7 +200,7 @@ static void stream_poll()
 {
     uint8_t pkt[4096];
     for (int n = 0; n < 256; n++) {
-        ssize_t r = recv(g_stream, pkt, sizeof(pkt), MSG_DONTWAIT);
+        ssize_t r = recv(g_stream, pkt, sizeof(pkt), 0); // socket is non-blocking
         if (r < SHARD_PREFIX)
             return;
         uint16_t stream = (uint16_t)(pkt[4] << 8 | pkt[5]);
@@ -353,6 +361,7 @@ static void run_session(int fd, uint32_t server_ip_be)
     g_control = fd;
     int one = 1;
     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+    setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one));
     fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK);
     char ip[16];
     inet_ntop(AF_INET, &server_ip_be, ip, sizeof(ip));
@@ -443,6 +452,7 @@ static void run_session(int fd, uint32_t server_ip_be)
             LOG("alvr: stream socket bind/connect failed");
             goto end;
         }
+        fcntl(g_stream, F_SETFL, fcntl(g_stream, F_GETFL, 0) | O_NONBLOCK);
         memset(g_tx_index, 0, sizeof(g_tx_index));
         if (!control_send_unit(C_STREAM_READY))
             goto end;
@@ -608,8 +618,15 @@ void alvr_start(const char *hostname, const char *local_ip, const AlvrViews *vie
     g_haptics = haptics;
     memset(&g_status, 0, sizeof(g_status));
     init_paths();
+    // A send() on a socket the streamer closed raises SIGPIPE, which kills the app
+    // (CE-34878-0 right after a SteamVR restart). Ignore it; errors come back as EPIPE.
+    signal(SIGPIPE, SIG_IGN);
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, 512 * 1024);
     pthread_t th;
-    pthread_create(&th, nullptr, net_thread, nullptr);
+    pthread_create(&th, &attr, net_thread, nullptr);
+    pthread_attr_destroy(&attr);
 }
 
 void alvr_get_status(AlvrStatus *out)
