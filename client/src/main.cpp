@@ -24,7 +24,7 @@
 #include "screen.h"
 #include "tracker.h"
 
-#define ALVR_PS4_VERSION "0.4.3 (stage 3: 3D lobby)"
+#define ALVR_PS4_VERSION "0.4.4 (stage 3: 3D lobby)"
 
 static char g_ip[16] = "?";
 
@@ -211,9 +211,17 @@ static bool render_lobby(Screen *s)
         lobby_render_eye(eye_buf[cur][eye], eye_w, eye_h, eye_w, &view, eye);
         gnm_texture_linear_bgra(&eye_tex[cur][eye], eye_buf[cur][eye], eye_w, eye_h, eye_w);
     }
-    const float fov_left[4] = {view.fov[0].tan_left, view.fov[0].tan_right, view.fov[0].tan_up, view.fov[0].tan_down};
-    const float fov_right[4] = {view.fov[1].tan_left, view.fov[1].tan_right, view.fov[1].tan_up,
-                                view.fov[1].tan_down};
+    // Per-eye block for the compositor: the texture's extent in tangent space as
+    // {half width, half height, centre x, centre y} (same scale/offset form as the
+    // 2D screen's {1, 1, 0, 0}). Raw edge tangents here put the image in a corner.
+    float fov_block[2][4];
+    for (int eye = 0; eye < 2; eye++) {
+        const EyeFov &e = view.fov[eye];
+        fov_block[eye][0] = (e.tan_left + e.tan_right) * 0.5f;
+        fov_block[eye][1] = (e.tan_up + e.tan_down) * 0.5f;
+        fov_block[eye][2] = (e.tan_right - e.tan_left) * 0.5f;
+        fov_block[eye][3] = (e.tan_up - e.tan_down) * 0.5f;
+    }
     ReprojPose pose;
     memset(&pose, 0, sizeof(pose));
     pose.timestamp = g_tracker.timestamp;
@@ -224,7 +232,7 @@ static bool render_lobby(Screen *s)
     pose.position[0] = tp.px;
     pose.position[1] = tp.py;
     pose.position[2] = tp.pz;
-    bool ok = reproj_submit_stereo(&eye_tex[cur][0], &eye_tex[cur][1], fov_left, fov_right, &pose) == 0;
+    bool ok = reproj_submit_stereo(&eye_tex[cur][0], &eye_tex[cur][1], fov_block[0], fov_block[1], &pose) == 0;
     cur ^= 1;
     return ok;
 }
