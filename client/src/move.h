@@ -4,8 +4,8 @@
 
 #include "tracker.h"
 
-// PS Move controllers (libSceMove), registered with the VR tracker. The sphere is
-// lit with the colour the tracker assigns to each controller.
+// PS Move controllers (libSceMove), registered with the VR tracker once connected.
+// The tracker drives the sphere colour itself.
 
 #define MOVE_MAX 2
 
@@ -15,16 +15,14 @@ struct MoveController {
     float sphere_radius;
     uint16_t buttons; // raw button bits (mapping logged, see move.cpp)
     uint16_t trigger; // 0..255
-    uint32_t sphere_color_set; // tracker colour index last applied, ~0 if none
-    uint64_t sphere_sent_us;   // last sceMoveSetLightSphere, for the periodic refresh
-    uint32_t sphere_toggle;    // alternates 255/254 so each refresh is a new colour
+    uint64_t next_register_us; // tracker registration retry time
     TrackedDevice track;
 };
 
 // Opens both controllers for the user and registers them with the tracker
 // (call after tracker_start).
 void move_start(int move_module, int user_id, MoveController out[MOVE_MAX]);
-// Reads buttons and tracking, keeps the sphere colour in sync with the tracker.
+// Reads buttons and tracking; (un)registers controllers as they (dis)connect.
 void move_update(MoveController ctl[MOVE_MAX]);
 // RGB of a tracker LED colour index.
 uint32_t move_led_rgb(uint32_t led_color);

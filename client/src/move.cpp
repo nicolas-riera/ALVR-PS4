@@ -63,7 +63,6 @@ void move_start(int module, int user_id, MoveController ctl[MOVE_MAX])
     for (int i = 0; i < MOVE_MAX; i++) {
         memset(&ctl[i], 0, sizeof(ctl[i]));
         ctl[i].handle = -1;
-        ctl[i].sphere_color_set = ~0u;
     }
     if (module < 0)
         return;
@@ -89,9 +88,9 @@ void move_start(int module, int user_id, MoveController ctl[MOVE_MAX])
         ctl[i].connected = rc == 0;
         ctl[i].sphere_radius = info.sphere_radius;
         LOG("move %d: GetDeviceInfo -> 0x%08x sphere_radius=%.4f", i, (unsigned)rc, info.sphere_radius);
-        // Registered even when not connected yet, as the games do: the tracker picks it
-        // up when the controller turns on.
-        tracker_register_device(&ctl[i].track, TRACKER_DEVICE_MOVE, h);
+        // Registered with the tracker once connected (see move_update): registering a
+        // sleeping controller left its sphere dark until the tracker was restarted.
+        ctl[i].track.handle = h;
     }
 }
 
@@ -108,38 +107,22 @@ void move_update(MoveController ctl[MOVE_MAX])
         if (connected != c.connected) {
             LOG("move %d: %s (ReadStateLatest 0x%08x)", i, connected ? "connected" : "disconnected", (unsigned)rc);
             c.connected = connected;
-            c.sphere_color_set = ~0u; // re-apply the colour after a reconnection
         }
+        uint64_t now = sceKernelGetProcessTime();
+        if (connected && !c.track.registered && now >= c.next_register_us) {
+            if (!tracker_register_device(&c.track, TRACKER_DEVICE_MOVE, c.handle))
+                c.next_register_us = now + 2000000; // retry in 2 s
+        }
+        else if (!connected && c.track.registered)
+            tracker_unregister_device(&c.track);
         if (connected) {
             if (d.buttons != c.buttons)
                 LOG("move %d: buttons 0x%04x -> 0x%04x", i, c.buttons, d.buttons);
             c.buttons = d.buttons;
             c.trigger = d.trigger;
         }
-
+        // The sphere is driven by the VR tracker itself (as it does for the headset
+        // LEDs); setting it from here fought with the tracker and switched it off.
         tracker_update_device(&c.track);
-        // Light the sphere with the colour the tracker expects to see and keep refreshing
-        // it: the controller turns the sphere off when it stops receiving commands, and
-        // libSceMove apparently drops requests identical to the previous one (re-sending the
-        // same colour every second still let it go dark). Alternating 255/254 on the lit
-        // channels makes every refresh a real command; the difference is invisible.
-        uint64_t now = sceKernelGetProcessTime();
-        if (connected && c.track.last_rc == 0 &&
-            (c.track.led_color != c.sphere_color_set || now - c.sphere_sent_us > 500000)) {
-            uint32_t rgb = move_led_rgb(c.track.led_color);
-            c.sphere_toggle ^= 1;
-            uint8_t r = rgb >> 16, g = (rgb >> 8) & 0xff, b = rgb & 0xff;
-            if (c.sphere_toggle) {
-                r -= r ? 1 : 0;
-                g -= g ? 1 : 0;
-                b -= b ? 1 : 0;
-            }
-            rc = p_set_sphere(c.handle, r, g, b);
-            if (c.track.led_color != c.sphere_color_set || rc != 0)
-                LOG("move %d: sphere colour %u (#%06x) -> 0x%08x", i, c.track.led_color, rgb, (unsigned)rc);
-            c.sphere_sent_us = now;
-            if (rc == 0)
-                c.sphere_color_set = c.track.led_color;
-        }
     }
 }
