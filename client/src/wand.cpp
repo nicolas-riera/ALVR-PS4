@@ -31,8 +31,8 @@ void wand_update(WandEmulator *emu, Hand hand, const MoveController &move, WandI
 
     if (emu->dragging) {
         // Rotation since the press, in the controller's own frame (handle along +Z,
-        // sphere forward along -Z): turning right moves the touch right, tilting the
-        // sphere up moves it up.
+        // sphere forward along -Z). Horizontal follows the roll (clockwise seen from the
+        // handle = right), vertical follows the pitch (inverted after the first test).
         Quat d = mul(conj(emu->reference), cur);
         if (d.w < 0) {
             d.x = -d.x;
@@ -40,8 +40,8 @@ void wand_update(WandEmulator *emu, Hand hand, const MoveController &move, WandI
             d.z = -d.z;
             d.w = -d.w;
         }
-        float x = -2.0f * d.y / WAND_PAD_RANGE_RAD;
-        float y = 2.0f * d.x / WAND_PAD_RANGE_RAD;
+        float x = -2.0f * d.z / WAND_PAD_RANGE_RAD;
+        float y = -2.0f * d.x / WAND_PAD_RANGE_RAD;
         float len = sqrtf(x * x + y * y);
         if (len > 1.0f) {
             x /= len;

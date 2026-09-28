@@ -242,9 +242,10 @@ static void draw_info_panel(const EyeTarget &t, const LobbyView *view)
     while (n < 6 && view->info[n])
         n++;
     for (int i = 0; i < n; i++) {
-        float w = text_width(view->info[i], h);
+        const float hi = i == 0 ? h * 1.4f : h; // title larger
+        float w = text_width(view->info[i], hi);
         Vec3 o = view->info_pos + right * (-w * 0.5f) + up * ((n - 1) * gap * 0.5f - i * gap);
-        draw_text3d(t, o, right, up, i == 0 ? h * 1.4f : h, view->info[i], PIXEL_ALPHA | (i == 0 ? 0xffffff : 0xb8c4d0));
+        draw_text3d(t, o, right, up, hi, view->info[i], PIXEL_ALPHA | 0xffffff);
     }
 }
 

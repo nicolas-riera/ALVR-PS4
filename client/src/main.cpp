@@ -28,7 +28,7 @@
 #include "screen.h"
 #include "tracker.h"
 
-#define ALVR_PS4_VERSION "0.6.0 (lobby + wand emulation)"
+#define ALVR_PS4_VERSION "0.6.1"
 
 static char g_ip[16] = "?";
 
@@ -236,10 +236,8 @@ static bool render_lobby(Screen *s)
     for (int i = 0; i < MOVE_MAX; i++) {
         const MoveController &m = g_moves[i];
         LobbyView::Controller &c = view.controllers[i];
-        const uint64_t now = sceKernelGetProcessTime();
-        const bool searching = !m.track.last_seen_us || now - m.track.last_seen_us > TRACKER_CONTROLLER_SEARCHING_US;
-        // Still reported (greyed) while lost, hidden once "searching" (10 s without camera).
-        c.visible = m.connected && m.track.has_position && !searching;
+        // Always shown in the lobby; the 10 s "searching" state is only for SteamVR.
+        c.visible = m.connected && m.track.has_position;
         c.pos = v3(m.track.position[0], m.track.position[1], m.track.position[2]);
         c.rot = Quat{m.track.orientation[0], m.track.orientation[1], m.track.orientation[2], m.track.orientation[3]};
         c.rgb = move_led_rgb(m.track.led_color);
@@ -250,8 +248,8 @@ static bool render_lobby(Screen *s)
         c.pad_x = w.pad_x;
         c.pad_y = w.pad_y;
     }
-    // Headset: grey screen once the camera has not seen it for 2 s.
-    view.grey = g_tracker.last_seen_us && sceKernelGetProcessTime() - g_tracker.last_seen_us > TRACKER_HMD_SEARCHING_US;
+    // The 2 s "searching" state of the headset is only reported to SteamVR.
+    view.grey = false;
     // Info panel, once, far in front (towards the camera, 3 m beyond it).
     static char info_lines[5][96];
     snprintf(info_lines[0], sizeof(info_lines[0]), "ALVR PS4");
@@ -428,8 +426,13 @@ int main()
                     w.trigger_click ? " (click)" : "");
         }
         if (screen.handle > 0 && reproj_active()) {
-            // 3D lobby once the tracker has an orientation, 2D status screen before that.
-            bool stereo = g_tracker.results_ok && g_tracker.orientation_quality != 0 && render_lobby(&screen);
+            // 3D lobby once the tracker has given an orientation; the 2D status screen is
+            // only shown before that. Afterwards the lobby keeps the last pose (the quality
+            // drops briefly during a tracking reset, which flashed the 2D screen).
+            static bool lobby_started = false;
+            if (g_tracker.results_ok && g_tracker.orientation_quality != 0)
+                lobby_started = true;
+            bool stereo = lobby_started && render_lobby(&screen);
             if (!stereo) {
                 draw(&screen, frame);
                 static GnmTexture tex[2];

@@ -4,7 +4,7 @@
 #include "vrmath.h"
 
 // HTC Vive wand emulation from a PS Move, in the spirit of PSMoveServiceEx:
-//   trackpad touch  MOVE held + rotation (touch starts at the pad centre on press)
+//   trackpad touch  MOVE held + roll (x) / pitch (y); starts at the pad centre on press
 //   trackpad click  TRIANGLE (left) / SQUARE (right) + rotation
 //   grip            CIRCLE (left) / CROSS (right)
 //   menu            SQUARE (left) / TRIANGLE (right)
