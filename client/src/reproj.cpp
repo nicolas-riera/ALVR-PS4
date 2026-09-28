@@ -37,8 +37,8 @@ struct Reproj2dParam {
 // non-null, [7] 8-aligned, [8] in 2000..6999, [10] < 2, [0xb] & ~0xf0000000f == 0,
 // [0xc..0xf] zero. The stereo mesh builder (0x94c0) copies T#s from [0] and [1],
 // a sampler from [2], and per-eye 16-byte blocks from [3..4] and [5..6]: where the
-// eye texture sits in tangent space, {total width, total height, left, up}; screen
-// tangent (x right, y down) = -offset + uv * scale.
+// eye texture sits: a tangent -> uv transform, uv = tangent * scale + offset
+// (x right, y down), as {scale x, scale y, offset x, offset y}.
 struct ReprojStereoParam {
     const GnmTexture *left;
     const GnmTexture *right;

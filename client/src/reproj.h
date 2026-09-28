@@ -36,7 +36,7 @@ struct ReprojPose {
 };
 
 // Shows a stereo frame: one texture per eye, plus where each texture sits in
-// tangent space: {total width, total height, left tangent, up tangent}.
+// tangent space, as uv = tangent * scale + offset: {scale x, scale y, offset x, offset y}.
 int reproj_submit_stereo(const GnmTexture *left, const GnmTexture *right, const float fov_left[4],
                          const float fov_right[4], const ReprojPose *pose);
 
