@@ -3,6 +3,7 @@
 #include <emmintrin.h>
 #include <pthread.h>
 #include <string.h>
+#include <sys/resource.h>
 
 #include <orbis/libkernel.h>
 
@@ -115,6 +116,7 @@ static ResetFn p_reset;
 // State
 
 static const int QUEUE_SLOTS = 8;
+static const int MAX_QUEUED = 4;
 static const size_t CONFIG_MAX = 1024;       // SPS/PPS, prepended to IDR frames in place
 static const size_t SLOT_SIZE = 3 << 20;     // largest access unit accepted (+ CONFIG_MAX)
 static const int EYE_SETS = 4;               // published, displayed, previously displayed, writing
@@ -177,6 +179,16 @@ static uint64_t g_pub_ts, g_pub_decoded_us;
 static unsigned g_pub_seq;
 
 static uint64_t now_us() { return sceKernelGetProcessTime(); }
+
+// CPU time of the calling thread (0 if unavailable): tells whether Decode waits for the
+// hardware or parses the bitstream on this thread.
+static uint64_t thread_cpu_us()
+{
+    struct rusage ru;
+    if (getrusage(1 /* RUSAGE_THREAD */, &ru) != 0)
+        return 0;
+    return (uint64_t)(ru.ru_utime.tv_sec + ru.ru_stime.tv_sec) * 1000000 + ru.ru_utime.tv_usec + ru.ru_stime.tv_usec;
+}
 
 static void *alloc_direct(size_t size, size_t align, int mem_type, const char *what)
 {
@@ -518,9 +530,9 @@ static void decode_one(Slot &s, const uint8_t *config, size_t config_len)
     fb.frame_buffer_size = g_frame_buffer_size;
     Vdec2OutputInfo out{};
     out.this_size = sizeof(out);
-    uint64_t t0 = now_us();
+    uint64_t t0 = now_us(), c0 = thread_cpu_us();
     int rc = p_decode(g_decoder, &in, &fb, &out);
-    uint64_t t1 = now_us();
+    uint64_t t1 = now_us(), c1 = thread_cpu_us();
     if (rc == 0 && g_ts_count < 16)
         g_ts_fifo[(g_ts_head + g_ts_count++) % 16] = s.timestamp_ns;
     static unsigned logged;
@@ -543,6 +555,8 @@ static void decode_one(Slot &s, const uint8_t *config, size_t config_len)
     pthread_mutex_lock(&g_lock);
     g_stats.decoded++;
     g_stats.decode_us_avg = (g_stats.decode_us_avg * 15 + (t1 - t0)) / 16;
+    if (c0 && c1 >= c0)
+        g_stats.decode_cpu_us_avg = (g_stats.decode_cpu_us_avg * 15 + (c1 - c0)) / 16;
     pthread_mutex_unlock(&g_lock);
     if (!out.is_valid)
         return;
@@ -740,7 +754,9 @@ void video_push_frame(uint64_t timestamp_ns, bool is_idr, const uint8_t *data, s
         pthread_mutex_unlock(&g_lock);
         return;
     }
-    if (g_count >= QUEUE_SLOTS - 1) { // decoder too far behind: restart from an IDR
+    // More than MAX_QUEUED frames waiting (~67 ms at 60 Hz) would only add latency (up to
+    // 190 ms was seen in busy Beat Saber scenes): drop them and restart from an IDR.
+    if (g_count >= MAX_QUEUED) {
         g_stats.dropped++;
         request_idr_locked();
         pthread_mutex_unlock(&g_lock);
@@ -753,6 +769,7 @@ void video_push_frame(uint64_t timestamp_ns, bool is_idr, const uint8_t *data, s
     s.received_us = now_us();
     s.idr = is_idr;
     g_count++;
+    g_stats.bytes_avg = (g_stats.bytes_avg * 15 + len) / 16;
     if ((unsigned)g_count > g_stats.queue_max)
         g_stats.queue_max = g_count;
     pthread_cond_signal(&g_cond);

@@ -40,5 +40,7 @@ struct VideoStats {
     unsigned received, decoded, shown_candidates, dropped, errors;
     unsigned queue_max; // most frames waiting for the decoder since the previous call
     uint64_t decode_us_avg, convert_us_avg;
+    uint64_t decode_cpu_us_avg; // CPU time the decode thread spends inside Decode
+    uint64_t bytes_avg;         // average access unit size
 };
 void video_get_stats(VideoStats *out);

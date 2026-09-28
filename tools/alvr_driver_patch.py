@@ -1,18 +1,24 @@
-"""Patch ALVR 20.14.1's SteamVR driver so the controller "menu" button stops also pressing "system".
+"""Patch ALVR 20.14.1's SteamVR driver (driver_alvr_server.dll) for the PS4 client.
 
-In driver_alvr_server.dll (alvr/server_openvr/cpp/alvr_server/Paths.cpp, lines 91 and 168),
-/user/hand/*/input/menu/click is hard-wired to two SteamVR components:
-{"/input/system/click", "/input/application_menu/click"}. The PS4 client's menu buttons
-(left SQUARE, right TRIANGLE) therefore also opened the SteamVR dashboard.
+1. Menu button no longer also presses "system".
+   /user/hand/*/input/menu/click is hard-wired to two SteamVR components (Paths.cpp, lines
+   91 and 168): {"/input/system/click", "/input/application_menu/click"}, so the PS4
+   client's menu buttons (left SQUARE, right TRIANGLE) also opened the SteamVR dashboard.
+   Each list is built on the stack as two pointers, [rbp-9] = system and [rbp-1] =
+   application_menu, passed as the range [rbp-9, rbp+7). Starting it at [rbp-1] leaves
+   only application_menu: one byte per hand.
+     left  @ RVA 0xa7a973, right @ RVA 0xa7b707: lea rax,[rbp-9] -> lea rax,[rbp-1]
 
-Each list is built on the stack as two pointers, [rbp-9] = system and [rbp-1] =
-application_menu, and passed as the range [rbp-9, rbp+7). Starting the range at [rbp-1]
-leaves only application_menu: one byte per hand, the displacement of "lea rax,[rbp-9]".
-
-  left  @ RVA 0xa7a973: lea rax,[rbp-9] -> lea rax,[rbp-1]
-  right @ RVA 0xa7b707: lea rax,[rbp-9] -> lea rax,[rbp-1]
-
-START (system/click) stays the only system button.
+2. Headset "searching" state.
+   Hmd::OnPoseUpdated always reports the headset as tracked (poseIsValid = true,
+   result = TrackingResult_Running_OK). The PS4 client signals a headset the camera has
+   lost for 3 s by a head height below -500 m (ALVR's recentering only moves x/z, so the
+   marker survives). At RVA 0xa78b7a, "mov dword [rsp+0x170], 200" (result) becomes a call
+   to a check placed in the unused tail of .text (RVA 0xae2d40, the section's VirtualSize
+   grows to its raw size to map it):
+       result = 200; if (motion.position.y < -500) { result = 201 /*Running_OutOfRange*/;
+                                                     poseIsValid = false; }
+   SteamVR then shows the headset as searching, with its grey screen.
 
 The original bytes are checked first and the DLL is backed up as
 driver_alvr_server.dll.orig. SteamVR locks the DLL, so this waits until vrserver.exe exits.
@@ -33,23 +39,53 @@ UNDO = "--undo" in sys.argv
 SYSTEM_CLICK_RVA = 0xBB2C38    # "/input/system/click", to recognise the 20.14.1 DLL
 APP_MENU_RVA = 0xBB2CB8        # "/input/application_menu/click"
 
-# (rva, original bytes, patched bytes)
+HMD_RESULT_RVA = 0xA78B7A      # mov dword [rsp+0x170], 0xc8 (DriverPose_t.result = 200)
+CAVE_RVA = 0xAE2D40            # tail of .text, zero padding in the file
+TEXT_VSIZE_ORIG, TEXT_VSIZE_NEW = 0xAE1D3F, 0xAE1E00
+
+CAVE = bytes.fromhex(
+    "c7842478010000c8000000"   # mov dword [rsp+0x178], 200    (rsp+8: we were called)
+    "448b531c"                 # mov r10d, [rbx+0x1c]          (FfiDeviceMotion.position.y)
+    "4181fa0000fac3"           # cmp r10d, 0xc3fa0000          (-500.0f)
+    "7613"                     # jbe done                      (unsigned: y >= -500 or positive)
+    "c7842478010000c9000000"   # mov dword [rsp+0x178], 201    (TrackingResult_Running_OutOfRange)
+    "c684247c01000000"         # mov byte [rsp+0x17c], 0       (poseIsValid = false)
+    "c3"                       # done: ret
+)
+CALL_CAVE = b"\xe8" + struct.pack("<i", CAVE_RVA - (HMD_RESULT_RVA + 5)) + bytes.fromhex("660f1f440000")
+
+# (where, original bytes, patched bytes); where = RVA, or ("text_vsize",) for the header
 PATCHES = [
     (0xA7A973, bytes.fromhex("488d45f7"), bytes.fromhex("488d45ff")),
     (0xA7B707, bytes.fromhex("488d45f7"), bytes.fromhex("488d45ff")),
+    (CAVE_RVA, bytes(len(CAVE)), CAVE),
+    (HMD_RESULT_RVA, bytes.fromhex("c7842470010000c8000000"), CALL_CAVE),
+    (("text_vsize",), struct.pack("<I", TEXT_VSIZE_ORIG), struct.pack("<I", TEXT_VSIZE_NEW)),
 ]
 
 
-def rva_to_offset(data, rva):
+def sections(data):
     pe = struct.unpack_from("<I", data, 0x3C)[0]
     nsec = struct.unpack_from("<H", data, pe + 6)[0]
     opt = struct.unpack_from("<H", data, pe + 20)[0]
     sec = pe + 24 + opt
     for i in range(nsec):
-        vsize, va, rawsize, raw = struct.unpack_from("<IIII", data, sec + i * 40 + 8)
-        if va <= rva < va + max(vsize, rawsize):
-            return rva - va + raw
-    raise ValueError(hex(rva))
+        hdr = sec + i * 40
+        name = bytes(data[hdr:hdr + 8]).rstrip(b"\0")
+        vsize, va, rawsize, raw = struct.unpack_from("<IIII", data, hdr + 8)
+        yield name, hdr, vsize, va, rawsize, raw
+
+
+def offset_of(data, where):
+    if where == ("text_vsize",):
+        for name, hdr, *_ in sections(data):
+            if name == b".text":
+                return hdr + 8
+        raise ValueError(".text")
+    for _, _, vsize, va, rawsize, raw in sections(data):
+        if va <= where < va + max(vsize, rawsize):
+            return where - va + raw
+    raise ValueError(hex(where))
 
 
 def steamvr_running():
@@ -65,28 +101,30 @@ def main():
         time.sleep(2)
     data = bytearray(open(DLL, "rb").read())
     for s, text in ((SYSTEM_CLICK_RVA, b"/input/system/click\0"), (APP_MENU_RVA, b"/input/application_menu/click\0")):
-        o = rva_to_offset(data, s)
+        o = offset_of(data, s)
         if bytes(data[o:o + len(text)]) != text:
             sys.exit("Unexpected driver_alvr_server.dll: this patch is for ALVR 20.14.1 (Windows) only.")
-    done = 0
-    for rva, orig, patched in PATCHES:
-        o = rva_to_offset(data, rva)
+    # Validate everything before writing anything.
+    todo = []
+    for where, orig, patched in PATCHES:
+        o = offset_of(data, where)
         cur = bytes(data[o:o + len(orig)])
         want_from, want_to = (patched, orig) if UNDO else (orig, patched)
         if cur == want_to:
             continue
         if cur != want_from:
-            sys.exit(f"Unexpected bytes at RVA {rva:#x}: {cur.hex()} (not ALVR 20.14.1?)")
-        data[o:o + len(orig)] = want_to
-        done += 1
-    if not done:
+            sys.exit(f"Unexpected bytes at {where}: {cur.hex()} (not ALVR 20.14.1?)")
+        todo.append((o, want_to))
+    if not todo:
         print("Nothing to do: already " + ("original." if UNDO else "patched."))
         return
+    for o, b in todo:
+        data[o:o + len(b)] = b
     backup = DLL + ".orig"
     if not os.path.exists(backup):
         shutil.copy2(DLL, backup)
     open(DLL, "wb").write(data)
-    print(("Restored" if UNDO else "Patched") + f" {DLL} ({done} site(s)). Original kept in {backup}", flush=True)
+    print(("Restored" if UNDO else "Patched") + f" {DLL} ({len(todo)} site(s)). Original kept in {backup}", flush=True)
 
 
 main()

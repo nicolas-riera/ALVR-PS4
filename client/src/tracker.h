@@ -66,7 +66,7 @@ extern volatile uint32_t g_tracker_controller_prediction_us;
 
 // Time without camera view after which a device is reported as "searching".
 #define TRACKER_CONTROLLER_SEARCHING_US 10000000ull
-#define TRACKER_HMD_SEARCHING_US 2000000ull
+#define TRACKER_HMD_SEARCHING_US 3000000ull
 
 const char *tracker_status_name(uint32_t status);
 const char *tracker_quality_name(uint32_t q);

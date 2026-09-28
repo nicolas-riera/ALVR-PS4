@@ -32,7 +32,7 @@
 #include "audio.h"
 #include "video.h"
 
-#define ALVR_PS4_VERSION "0.9.1"
+#define ALVR_PS4_VERSION "0.9.2"
 
 static char g_ip[16] = "?";
 
@@ -328,9 +328,11 @@ static bool render_video()
     if (now - stat_start >= 5000000) {
         VideoStats vs;
         video_get_stats(&vs);
-        LOG("video: %.1f fps, rx %u dec %u drop %u err %u, decode %.1f ms, convert %.1f ms, queue %u, m2p %.0f ms",
+        LOG("video: %.1f fps, rx %u dec %u drop %u err %u, decode %.1f ms (cpu %.1f), %.0f KB/frame, convert %.1f ms, "
+            "queue %u, m2p %.0f ms",
             shown * 1e6 / (double)(now - stat_start), vs.received, vs.decoded, vs.dropped, vs.errors,
-            vs.decode_us_avg / 1000.0, vs.convert_us_avg / 1000.0, vs.queue_max, m2p_avg_us / 1000.0);
+            vs.decode_us_avg / 1000.0, vs.decode_cpu_us_avg / 1000.0, vs.bytes_avg / 1024.0, vs.convert_us_avg / 1000.0,
+            vs.queue_max, m2p_avg_us / 1000.0);
         stat_start = now;
         shown = 0;
     }
@@ -540,6 +542,17 @@ static void send_alvr_uplink()
     float hq[4] = {eyes ? l.qx : d.qx, eyes ? l.qy : d.qy, eyes ? l.qz : d.qz, eyes ? l.qw : d.qw};
     to_stage(hp, hq, &head);
     const uint64_t now = sceKernelGetProcessTime();
+    // Headset not seen by the camera for 3 s: SteamVR shows it as searching (grey screen).
+    // The 20.14.1 protocol cannot say so; the patched driver (tools/alvr_driver_patch.py)
+    // treats a head below -500 m as out of range. Only SteamVR sees this, not the lobby.
+    bool head_lost = !g_tracker.last_seen_us || now - g_tracker.last_seen_us > TRACKER_HMD_SEARCHING_US;
+    static bool head_lost_logged;
+    if (head_lost != head_lost_logged) {
+        LOG("headset %s", head_lost ? "lost for 3 s: reported as searching to SteamVR" : "tracked again");
+        head_lost_logged = head_lost;
+    }
+    if (head_lost)
+        head.position[1] = -1000.0f;
     for (int i = 0; i < MOVE_MAX; i++) {
         const MoveController &m = g_moves[i];
         int hand = move_index_hand(i) == HAND_LEFT ? 0 : 1;

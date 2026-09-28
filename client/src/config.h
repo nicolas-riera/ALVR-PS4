@@ -9,6 +9,7 @@ struct ClientConfig {
     // Stream resolution per eye, in percent of the PSVR panel (960x1080). Above 100 the
     // PC renders more pixels than the panel has, which keeps text sharp through the lens
     // distortion (PSVR games do the same).
+    // Past 2048 pixels of stream width (107%), decoding became several times slower.
     int resolution_percent;
     // Extra controller prediction on top of SteamVR's own (which uses the velocities).
     int controller_prediction_ms;

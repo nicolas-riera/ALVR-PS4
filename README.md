@@ -36,20 +36,35 @@ between versions, so any other streamer version will not connect.
 
 ## 2. Set up the ALVR streamer on the PC
 
-1. Extract ALVR streamer 20.14.1 and start **ALVR Dashboard.exe**. Follow its setup wizard
-   (it registers the SteamVR driver and adds the firewall rules for ports 9943 and 9944).
-2. Apply the PS4 settings below, either with the script (recommended) or by hand.
+### Automatic setup (recommended)
 
-### With the script (recommended)
+Double-click **`pc-setup\Setup ALVR for PS4.bat`** and accept the administrator prompt. It:
 
-```
-python tools\alvr_setup.py "C:\path\to\alvr_streamer_windows\session.json"
-```
+1. closes the ALVR dashboard and SteamVR if they run;
+2. downloads ALVR streamer **20.14.1** into `%LOCALAPPDATA%\Programs\ALVR-PS4\alvr_streamer_windows`
+   (skipped if already there);
+3. patches its SteamVR driver (see "Driver patches" below; the download is checked by its
+   SHA-256 first, and the original is kept as `driver_alvr_server.dll.orig`);
+4. installs [VB-Audio Virtual Cable](https://vb-audio.com/Cable/) for the microphone,
+   unless Virtual Audio Cable or VB-Cable is already installed;
+5. writes the PS4 settings (the table below) into ALVR's `session.json`, after backing up
+   any existing one;
+6. opens the ALVR ports (9943-9944, UDP and TCP) in the Windows firewall;
+7. registers the driver with SteamVR, creates an "ALVR (PS4)" desktop shortcut and starts
+   the dashboard.
 
-The dashboard rewrites its settings while it runs, so the script waits until you close
-the dashboard, which also closes SteamVR. It saves a backup of `session.json`, then applies
-every setting in the table below. Run it again after an ALVR update or a settings reset.
-Add `--mic` to also enable the microphone (see "Microphone" below).
+It is safe to run again. To install elsewhere:
+`"Setup ALVR for PS4.bat" -InstallDir D:\VR`.
+
+### Manual setup
+
+1. Extract [ALVR streamer 20.14.1](https://github.com/alvr-org/ALVR/releases/tag/v20.14.1)
+   (`alvr_streamer_windows.zip`) and start **ALVR Dashboard.exe**. Follow its setup wizard,
+   which registers the SteamVR driver and adds the firewall rules.
+2. Apply the driver patches: `python tools\alvr_driver_patch.py "C:\path\to\alvr_streamer_windows\bin\win64\driver_alvr_server.dll"`.
+3. Apply the PS4 settings: `python tools\alvr_setup.py --mic "C:\path\to\alvr_streamer_windows\session.json"`,
+   or set them by hand (table below). The dashboard rewrites its settings while it runs,
+   so the script waits until you close it. Leave out `--mic` without a virtual audio cable.
 
 ### Microphone
 
@@ -101,17 +116,19 @@ Button mappings: for `left` and `right`, each source maps to one destination wit
 | `thumbstick/click` | `trackpad/click` |
 | `thumbstick/touch` | `trackpad/touch` |
 
-### Driver patch: keep "menu" separate from "system"
+### Driver patches
 
-The ALVR 20.14.1 SteamVR driver hard-wires every controller's menu button to both the
-Vive **application menu** and **system** inputs (`Paths.cpp`), so the PS Move menu buttons
-(left □, right △) would also open the SteamVR dashboard. No setting can change this.
-`tools/alvr_driver_patch.py` changes one byte per hand in `driver_alvr_server.dll`, so that
-menu only feeds the application menu. START is then the only system button.
+Two behaviours of the ALVR 20.14.1 SteamVR driver cannot be changed by any setting.
+`tools/alvr_driver_patch.py` (and the automatic setup) patches `driver_alvr_server.dll`:
 
-```
-python tools\alvr_driver_patch.py "C:\path\to\alvr_streamer_windows\bin\win64\driver_alvr_server.dll"
-```
+* **Menu is not system.** The driver wires every controller's menu button to both the Vive
+  **application menu** and **system** inputs (`Paths.cpp`), so the PS Move menu buttons
+  (left □, right △) also opened the SteamVR dashboard. One byte per hand makes menu feed
+  only the application menu; START stays the system button.
+* **Headset "searching".** The driver always reports the headset as tracked. When the PS
+  Camera has not seen the headset for 3 seconds, the PS4 client sends a marker height
+  (below −500 m). The patched driver then reports the headset as out of range, and SteamVR
+  shows it as searching, with its grey screen. The PS4 lobby is not affected.
 
 The script waits until SteamVR is closed, because the DLL is locked while it runs. It checks
 that the DLL really is 20.14.1 and keeps the original as `driver_alvr_server.dll.orig`.
@@ -165,7 +182,8 @@ while no PC is connected.
 tracking is reset, as in PSVR games.
 
 **Tracking loss:** a Move hidden from the camera keeps its last position. SteamVR shows it
-as "searching" after 10 s. When the headset is lost, SteamVR shows it as "searching" after 2 s.
+as "searching" after 10 s. A headset the camera has lost is shown as "searching", with
+SteamVR's grey screen, after 3 s (needs the driver patch).
 
 ## Troubleshooting
 
@@ -207,7 +225,8 @@ OpenSSL 1.1 in `~/ps4/libssl11` (PkgTool needs it; Debian 13 no longer ships it)
 | `client/src/lobby.*` | software-rendered lobby |
 | `docs/alvr-20.14.1-protocol.md` | the ALVR 20.14.1 wire protocol, as implemented |
 | `tools/alvr_setup.py` | PC-side ALVR settings for this client |
-| `tools/alvr_driver_patch.py` | ALVR 20.14.1 driver fix: menu button no longer presses system |
+| `tools/alvr_driver_patch.py` | ALVR 20.14.1 driver patches: menu is not system, headset "searching" |
+| `pc-setup/` | one-click PC setup (`Setup ALVR for PS4.bat`, `setup.ps1`, settings template) |
 | `tools/re/` | reverse-engineering helpers (headless Ghidra on dumped system modules) |
 
 The PS4 client's settings are stored in `/data/alvr-ps4/config.txt` on the console. Edit
@@ -216,5 +235,5 @@ it over GoldHEN's FTP server, then restart the app:
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `hostname` | random `NNNN.client` | the name the PS4 announces to ALVR |
-| `resolution_percent` | `130` | stream resolution per eye, in percent of the PSVR panel (960×1080), 50–160 |
+| `resolution_percent` | `107` | stream resolution per eye, in percent of the PSVR panel (960×1080), 50–160. 107 (1024×1152) keeps the stream 2048 pixels wide; above, decoding became several times slower |
 | `controller_prediction_ms` | `0` | extra controller prediction on top of SteamVR's, 0–60 |
