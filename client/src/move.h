@@ -29,6 +29,8 @@ struct MoveController {
     uint16_t buttons; // MoveButton bits
     uint16_t trigger; // 0..255
     uint64_t next_register_us; // tracker registration retry time
+    uint8_t vibration;         // current motor intensity
+    uint64_t vibration_end_us; // 0 = no timed pulse
     TrackedDevice track;
 };
 
@@ -37,5 +39,7 @@ struct MoveController {
 void move_start(int move_module, int user_id, MoveController out[MOVE_MAX]);
 // Reads buttons and tracking; (un)registers controllers as they (dis)connect.
 void move_update(MoveController ctl[MOVE_MAX]);
+// Rumble: intensity 0..255, for duration_ms (0 = until changed).
+void move_vibrate(MoveController *ctl, uint8_t intensity, uint32_t duration_ms);
 // RGB of a tracker LED colour index.
 uint32_t move_led_rgb(uint32_t led_color);

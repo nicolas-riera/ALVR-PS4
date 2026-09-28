@@ -23,7 +23,13 @@ struct LobbyView {
         Quat rot;
         uint32_t rgb;  // sphere colour
         bool tracked;  // position currently seen by the camera
+        bool pad_touch, pad_click;
+        float pad_x, pad_y;
     } controllers[2];
+    bool grey;              // headset lost the camera for too long: grey screen
+    const char *info[6];    // info panel lines (nullptr-terminated)
+    Vec3 info_pos;          // panel centre, tracker space
+    float info_yaw;         // panel facing (radians around +Y; 0 faces +Z)
 };
 
 // One eye (0 = left, 1 = right) into its own image.

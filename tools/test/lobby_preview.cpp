@@ -24,7 +24,20 @@ int main(int argc, char **argv)
         v.controllers[i].rot = Quat{0.3827f, 0, 0, 0.9239f}; // tilted 45 deg around X
         v.controllers[i].rgb = i ? 0xff00ff : 0x00ffff;
         v.controllers[i].tracked = true;
+        v.controllers[i].pad_touch = i == 0;
+        v.controllers[i].pad_click = false;
+        v.controllers[i].pad_x = 0.5f;
+        v.controllers[i].pad_y = 0.3f;
     }
+    v.grey = false;
+    v.info[0] = "ALVR PS4";
+    v.info[1] = "Waiting for the PC (ALVR streamer 20.14.1)";
+    v.info[2] = "Hostname: 1234.client";
+    v.info[3] = "IP: 192.168.0.124";
+    v.info[4] = "Client v0.6.0";
+    v.info[5] = nullptr;
+    v.info_pos = v3(0.0f, v.floor_y + 1.6f, -3.0f);
+    v.info_yaw = 0.0f;
     lobby_render(px, W, H, W, &v);
     FILE *f = fopen(argc > 1 ? argv[1] : "lobby.ppm", "wb");
     fprintf(f, "P6 %d %d 255\n", W, H);

@@ -401,6 +401,8 @@ void tracker_update(TrackerState *st)
         return;
 
     const ResultData *r = (const ResultData *)g_result_buf;
+    if (r->position_quality == 9 || r->position_quality == 6)
+        st->last_seen_us = sceKernelGetProcessTime();
     if (r->status != st->status || r->position_quality != st->position_quality ||
         r->orientation_quality != st->orientation_quality || r->led_color != st->led_color)
         LOG("tracker: status=%s pos=%s orient=%s led_color=%u connected=%u", tracker_status_name(r->status),
@@ -501,6 +503,8 @@ void tracker_update_device(TrackedDevice *d)
     d->orientation_quality = r->orientation_quality;
     d->led_color = r->led_color;
     d->timestamp = r->timestamp;
+    if (r->position_quality == 9 || r->position_quality == 6)
+        d->last_seen_us = sceKernelGetProcessTime();
     const TrackerPose &p = r->device_pose;
     if (r->position_quality != 0) {
         d->position[0] = p.px;
@@ -515,4 +519,45 @@ void tracker_update_device(TrackedDevice *d)
         d->orientation[3] = p.qw;
         d->has_orientation = true;
     }
+}
+
+struct RecalibrateParam {
+    uint32_t size; // 0x20
+    uint32_t device_type;
+    uint32_t calibration_type; // 0 = position, 2 = all
+    uint32_t reserved[5];
+};
+static_assert(sizeof(RecalibrateParam) == 0x20, "RecalibrateParam size");
+
+static void recalibrate(uint32_t type)
+{
+    auto fn = (int (*)(const RecalibrateParam *))resolve(g_tracker_module, "sceVrTrackerRecalibrate");
+    if (!fn)
+        return;
+    RecalibrateParam p;
+    memset(&p, 0, sizeof(p));
+    p.size = sizeof(p);
+    p.device_type = type;
+    p.calibration_type = 2; // as Beat Saber does for a full reset
+    int rc = fn(&p);
+    if (rc < 0) {
+        p.calibration_type = 0;
+        int rc2 = fn(&p);
+        LOG("sceVrTrackerRecalibrate(type %u): all -> 0x%08x, position -> 0x%08x", type, (unsigned)rc, (unsigned)rc2);
+    } else {
+        LOG("sceVrTrackerRecalibrate(type %u, all) -> 0x%08x", type, (unsigned)rc);
+    }
+}
+
+void tracker_recalibrate_all(TrackedDevice *devices, int count)
+{
+    if (!g_state || !g_state->initialized)
+        return;
+    recalibrate(DEVICE_HMD);
+    bool move_done = false;
+    for (int i = 0; i < count; i++)
+        if (devices[i].registered && devices[i].type == TRACKER_DEVICE_MOVE && !move_done) {
+            recalibrate(TRACKER_DEVICE_MOVE);
+            move_done = true;
+        }
 }

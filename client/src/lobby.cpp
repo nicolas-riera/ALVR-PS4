@@ -1,5 +1,7 @@
 #include "lobby.h"
 
+#include "stroke_font.h"
+
 #include <math.h>
 #include <string.h>
 
@@ -187,6 +189,63 @@ static void draw_controller(const EyeTarget &t, const LobbyView::Controller &c)
                                      {4, 6}, {5, 7}, {0, 4}, {1, 5}, {2, 6}, {3, 7}};
     for (auto &e : edges)
         line3d(t, p[e[0]], p[e[1]], PIXEL_ALPHA | 0xb0b0b0);
+
+    // Emulated trackpad: a ring on top of the handle, with the touch point.
+    if (c.pad_touch) {
+        const float pr = 0.022f;
+        Vec3 centre = c.pos + z * (r + 0.045f) + y * (hw + 0.004f);
+        circle3d(t, centre, x, z * -1.0f, pr, PIXEL_ALPHA | 0xffffff);
+        Vec3 dot = centre + x * (c.pad_x * pr) + z * (-c.pad_y * pr);
+        float dr = c.pad_click ? 0.006f : 0.003f;
+        circle3d(t, dot, x, z, dr, PIXEL_ALPHA | (c.pad_click ? 0xffd040 : 0xffffff));
+    }
+}
+
+// Stroke text on a plane: origin at the baseline start, `right`/`up` unit axes.
+static float text_width(const char *s, float height)
+{
+    const float scale = height / 0.662f; // cap height of the font in em
+    float w = 0;
+    for (; *s; s++) {
+        unsigned c = (unsigned char)*s;
+        w += (c >= 32 && c <= 126 ? stroke_font_glyphs[c - 32].advance : 0.5f) * scale;
+    }
+    return w;
+}
+
+static void draw_text3d(const EyeTarget &t, Vec3 origin, Vec3 right, Vec3 up, float height, const char *s,
+                        uint32_t col)
+{
+    const float scale = height / 0.662f;
+    float x = 0;
+    for (; *s; s++) {
+        unsigned c = (unsigned char)*s;
+        if (c < 32 || c > 126)
+            c = '?';
+        const StrokeGlyph &g = stroke_font_glyphs[c - 32];
+        for (int i = 0; i < g.count; i++) {
+            const float *seg = stroke_font_segs[g.first + i];
+            Vec3 a = origin + right * (x + seg[0] * scale) + up * (seg[1] * scale);
+            Vec3 b = origin + right * (x + seg[2] * scale) + up * (seg[3] * scale);
+            line3d(t, a, b, col);
+        }
+        x += g.advance * scale;
+    }
+}
+
+static void draw_info_panel(const EyeTarget &t, const LobbyView *view)
+{
+    const float h = 0.12f, gap = 0.21f;
+    Vec3 right = v3(cosf(view->info_yaw), 0, -sinf(view->info_yaw));
+    Vec3 up = v3(0, 1, 0);
+    int n = 0;
+    while (n < 6 && view->info[n])
+        n++;
+    for (int i = 0; i < n; i++) {
+        float w = text_width(view->info[i], h);
+        Vec3 o = view->info_pos + right * (-w * 0.5f) + up * ((n - 1) * gap * 0.5f - i * gap);
+        draw_text3d(t, o, right, up, i == 0 ? h * 1.4f : h, view->info[i], PIXEL_ALPHA | (i == 0 ? 0xffffff : 0xb8c4d0));
+    }
 }
 
 void lobby_render_eye(uint32_t *pixels, int width, int height, int pitch, const LobbyView *view, int eye)
@@ -207,7 +266,19 @@ void lobby_render_eye(uint32_t *pixels, int width, int height, int pitch, const 
     t.eye_pos = view->eye_pos[eye];
     t.inv_rot = conj(view->eye_rot[eye]);
     t.fov = view->fov[eye];
+    if (view->grey) {
+        // Headset lost by the camera: plain grey, like a "searching" headset.
+        const uint64_t g2 = (uint64_t)(PIXEL_ALPHA | 0x404040) << 32 | (PIXEL_ALPHA | 0x404040);
+        for (int yy = 0; yy < height; yy++) {
+            uint64_t *row = (uint64_t *)(pixels + (size_t)yy * pitch);
+            for (int xx = 0; xx < width / 2; xx++)
+                row[xx] = g2;
+        }
+        return;
+    }
     draw_scene(t, view);
+    if (view->info[0])
+        draw_info_panel(t, view);
     for (auto &c : view->controllers)
         if (c.visible)
             draw_controller(t, c);

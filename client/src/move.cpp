@@ -30,10 +30,12 @@ typedef int (*PFN_Open)(int32_t user_id, int32_t type, int32_t index);
 typedef int (*PFN_GetDeviceInfo)(int32_t handle, MoveDeviceInfo *info);
 typedef int (*PFN_ReadStateLatest)(int32_t handle, MoveData *data);
 typedef int (*PFN_SetLightSphere)(int32_t handle, uint8_t r, uint8_t g, uint8_t b);
+typedef int (*PFN_SetVibration)(int32_t handle, uint8_t intensity);
 
 static PFN_ReadStateLatest p_read_latest;
 static PFN_SetLightSphere p_set_sphere;
 static PFN_GetDeviceInfo p_get_info;
+static PFN_SetVibration p_set_vibration;
 
 static void *resolve(int module, const char *name)
 {
@@ -71,6 +73,7 @@ void move_start(int module, int user_id, MoveController ctl[MOVE_MAX])
     p_get_info = (PFN_GetDeviceInfo)resolve(module, "sceMoveGetDeviceInfo");
     p_read_latest = (PFN_ReadStateLatest)resolve(module, "sceMoveReadStateLatest");
     p_set_sphere = (PFN_SetLightSphere)resolve(module, "sceMoveSetLightSphere");
+    p_set_vibration = (PFN_SetVibration)resolve(module, "sceMoveSetVibration");
     if (!init || !open || !p_get_info || !p_read_latest || !p_set_sphere)
         return;
     int rc = init();
@@ -121,8 +124,23 @@ void move_update(MoveController ctl[MOVE_MAX])
             c.buttons = d.buttons;
             c.trigger = d.trigger;
         }
+        if (c.vibration_end_us && sceKernelGetProcessTime() >= c.vibration_end_us)
+            move_vibrate(&c, 0, 0);
         // The sphere is driven by the VR tracker itself (as it does for the headset
         // LEDs); setting it from here fought with the tracker and switched it off.
         tracker_update_device(&c.track);
     }
+}
+
+void move_vibrate(MoveController *c, uint8_t intensity, uint32_t duration_ms)
+{
+    if (c->handle < 0 || !p_set_vibration)
+        return;
+    c->vibration_end_us = duration_ms ? sceKernelGetProcessTime() + duration_ms * 1000ull : 0;
+    if (intensity == c->vibration)
+        return;
+    int rc = p_set_vibration(c->handle, intensity);
+    if (rc != 0)
+        LOG("sceMoveSetVibration(0x%x, %u) -> 0x%08x", c->handle, intensity, (unsigned)rc);
+    c->vibration = intensity;
 }

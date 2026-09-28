@@ -26,6 +26,7 @@ struct TrackerState {
     TrackerPose eye_pose[2]; // left, right (from the HMD result, includes the system IPD)
     TrackerPose head_pose;
     uint64_t timestamp;
+    uint64_t last_seen_us; // last time the camera saw the headset
     unsigned results_ok;
 };
 
@@ -48,7 +49,12 @@ struct TrackedDevice {
     float position[3];
     float orientation[4]; // x, y, z, w
     uint64_t timestamp;
+    uint64_t last_seen_us; // last time the camera saw it (position FULL or PARTIAL)
 };
+
+// Time without camera view after which a device is reported as "searching".
+#define TRACKER_CONTROLLER_SEARCHING_US 10000000ull
+#define TRACKER_HMD_SEARCHING_US 2000000ull
 
 const char *tracker_status_name(uint32_t status);
 const char *tracker_quality_name(uint32_t q);
@@ -64,5 +70,8 @@ bool tracker_register_device(TrackedDevice *d, uint32_t type, int handle);
 void tracker_unregister_device(TrackedDevice *d);
 // Reads the controller's latest result (call once per rendered frame).
 void tracker_update_device(TrackedDevice *d);
+// Full recalibration of the headset and of every registered controller (gyro drift
+// fix), done when the app comes back from the PS menu.
+void tracker_recalibrate_all(TrackedDevice *devices, int count);
 // Called once per rendered frame: reads the HMD pose.
 void tracker_update(TrackerState *st);

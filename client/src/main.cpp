@@ -20,13 +20,15 @@
 
 #include "hmd.h"
 #include "lobby.h"
+#include "config.h"
 #include "move.h"
+#include "wand.h"
 #include "reproj.h"
 #include "log.h"
 #include "screen.h"
 #include "tracker.h"
 
-#define ALVR_PS4_VERSION "0.5.3 (PS Move)"
+#define ALVR_PS4_VERSION "0.6.0 (lobby + wand emulation)"
 
 static char g_ip[16] = "?";
 
@@ -107,6 +109,9 @@ static HmdState g_hmd;
 static int g_user_id = -1;
 static TrackerState g_tracker;
 static MoveController g_moves[MOVE_MAX];
+static WandEmulator g_wand_emu[MOVE_MAX];
+static WandInput g_wand[MOVE_MAX];
+static ClientConfig g_config;
 
 static void start_headset()
 {
@@ -166,6 +171,14 @@ static void poll_system_events()
     memset(&st, 0, sizeof(st));
     if (system_get_status(&st) < 0)
         return;
+    if (last.is_in_background_execution && !st.is_in_background_execution) {
+        // Back from the PS menu: reset the tracking (gyro drift), as some games do.
+        LOG("back from the PS menu: recalibrating the tracking");
+        TrackedDevice devs[MOVE_MAX];
+        for (int i = 0; i < MOVE_MAX; i++)
+            devs[i] = g_moves[i].track;
+        tracker_recalibrate_all(devs, MOVE_MAX);
+    }
     if (st.is_system_ui_overlaid != last.is_system_ui_overlaid ||
         st.is_in_background_execution != last.is_in_background_execution ||
         st.is_out_of_vr_play_area != last.is_out_of_vr_play_area)
@@ -223,12 +236,34 @@ static bool render_lobby(Screen *s)
     for (int i = 0; i < MOVE_MAX; i++) {
         const MoveController &m = g_moves[i];
         LobbyView::Controller &c = view.controllers[i];
-        c.visible = m.connected && m.track.has_position;
+        const uint64_t now = sceKernelGetProcessTime();
+        const bool searching = !m.track.last_seen_us || now - m.track.last_seen_us > TRACKER_CONTROLLER_SEARCHING_US;
+        // Still reported (greyed) while lost, hidden once "searching" (10 s without camera).
+        c.visible = m.connected && m.track.has_position && !searching;
         c.pos = v3(m.track.position[0], m.track.position[1], m.track.position[2]);
         c.rot = Quat{m.track.orientation[0], m.track.orientation[1], m.track.orientation[2], m.track.orientation[3]};
         c.rgb = move_led_rgb(m.track.led_color);
         c.tracked = m.track.position_quality == 9 || m.track.position_quality == 6;
+        const WandInput &w = g_wand[i];
+        c.pad_touch = w.pad_touch;
+        c.pad_click = w.pad_click;
+        c.pad_x = w.pad_x;
+        c.pad_y = w.pad_y;
     }
+    // Headset: grey screen once the camera has not seen it for 2 s.
+    view.grey = g_tracker.last_seen_us && sceKernelGetProcessTime() - g_tracker.last_seen_us > TRACKER_HMD_SEARCHING_US;
+    // Info panel, once, far in front (towards the camera, 3 m beyond it).
+    static char info_lines[5][96];
+    snprintf(info_lines[0], sizeof(info_lines[0]), "ALVR PS4");
+    snprintf(info_lines[1], sizeof(info_lines[1]), "Waiting for the PC (ALVR streamer %s)", ALVR_STREAMER_VERSION);
+    snprintf(info_lines[2], sizeof(info_lines[2]), "Hostname: %s", g_config.hostname);
+    snprintf(info_lines[3], sizeof(info_lines[3]), "IP: %s", g_ip);
+    snprintf(info_lines[4], sizeof(info_lines[4]), "Client v%s", ALVR_PS4_VERSION);
+    for (int i = 0; i < 5; i++)
+        view.info[i] = info_lines[i];
+    view.info[5] = nullptr;
+    view.info_pos = v3(0.0f, floor_y + 2.1f, -3.0f);
+    view.info_yaw = 0.0f;
     // Each eye gets its own 960x1080 image with pitch == width: with both eyes in one
     // 1920-wide buffer the compositor ignored the pitch and mixed the eyes row by row.
     static uint32_t *eye_buf[2][2]; // [double-buffer index][eye]
@@ -347,6 +382,7 @@ int main()
     LOG("ALVR PS4 client v%s starting", ALVR_PS4_VERSION);
 
     read_ip();
+    config_load(&g_config);
     LOG("PS4 IP address: %s", g_ip);
 
     Screen screen;
@@ -374,6 +410,23 @@ int main()
     for (;;) {
         tracker_update(&g_tracker);
         move_update(g_moves);
+        for (int i = 0; i < MOVE_MAX; i++) {
+            WandInput prev = g_wand_emu[i].last;
+            wand_update(&g_wand_emu[i], move_index_hand(i), g_moves[i], &g_wand[i]);
+            const WandInput &w = g_wand[i];
+            // Lobby haptics feedback (until ALVR drives the motors): a tick on pad click
+            // and grip, a longer buzz on a full trigger pull.
+            if ((w.pad_click && !prev.pad_click) || (w.grip && !prev.grip))
+                move_vibrate(&g_moves[i], 150, 40);
+            if (w.trigger_click && !prev.trigger_click)
+                move_vibrate(&g_moves[i], 220, 120);
+            if (w.pad_click != prev.pad_click || w.grip != prev.grip || w.menu != prev.menu ||
+                w.system != prev.system || w.trigger_click != prev.trigger_click)
+                LOG("wand %s: pad %s%s (%.2f %.2f) grip=%d menu=%d system=%d trigger=%.2f%s",
+                    move_index_hand(i) == HAND_LEFT ? "L" : "R", w.pad_touch ? "touch" : "-",
+                    w.pad_click ? "+click" : "", w.pad_x, w.pad_y, w.grip, w.menu, w.system, w.trigger,
+                    w.trigger_click ? " (click)" : "");
+        }
         if (screen.handle > 0 && reproj_active()) {
             // 3D lobby once the tracker has an orientation, 2D status screen before that.
             bool stereo = g_tracker.results_ok && g_tracker.orientation_quality != 0 && render_lobby(&screen);
