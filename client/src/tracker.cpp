@@ -156,6 +156,7 @@ static PFN_SmallCall p_cpu_process;
 static int g_hmd_handle;
 static CameraState g_camera = {-1, 0};
 static TrackerState *g_state;
+static int g_tracker_module = -1;
 static volatile bool g_stop;
 static pthread_t g_thread;
 static bool g_thread_started;
@@ -222,6 +223,7 @@ bool tracker_start(int module, int camera_module, int hmd_handle, TrackerState *
     if (module < 0 || hmd_handle <= 0)
         return false;
 
+    g_tracker_module = module;
     auto query = (PFN_QueryMemory)resolve(module, "sceVrTrackerQueryMemory");
     auto init = (PFN_Init)resolve(module, "sceVrTrackerInit");
     auto reg = (PFN_RegisterDevice)resolve(module, "sceVrTrackerRegisterDevice");
@@ -356,12 +358,16 @@ static void *tracker_thread(void *)
                 continue;
             }
         }
-        UpdateMotionSensorDataParam mp;
-        memset(&mp, 0, sizeof(mp));
-        mp.size = sizeof(mp);
-        mp.device_type = DEVICE_HMD;
-        rc = p_update_motion(&mp);
-        log_on_change("sceVrTrackerUpdateMotionSensorData(HMD)", rc, &g_state->last_motion_rc);
+        // No camera frame: feed motion sensors of every device type, as the games do.
+        for (uint32_t type = 0; type <= TRACKER_DEVICE_MOVE; type++) {
+            UpdateMotionSensorDataParam mp;
+            memset(&mp, 0, sizeof(mp));
+            mp.size = sizeof(mp);
+            mp.device_type = type;
+            rc = p_update_motion(&mp);
+            if (type == DEVICE_HMD)
+                log_on_change("sceVrTrackerUpdateMotionSensorData(HMD)", rc, &g_state->last_motion_rc);
+        }
         sceKernelUsleep(2000);
     }
     return nullptr;
@@ -435,4 +441,78 @@ void tracker_stop(int module, int camera_module)
         g_state->initialized = false;
     }
     camera_stop(camera_module, &g_camera);
+}
+
+bool tracker_register_device(TrackedDevice *d, uint32_t type, int handle)
+{
+    memset(d, 0, sizeof(*d));
+    d->handle = handle;
+    d->type = type;
+    d->last_rc = 1;
+    d->orientation[3] = 1.0f;
+    if (!g_state || !g_state->initialized || g_tracker_module < 0 || handle < 0)
+        return false;
+    auto reg = (PFN_RegisterDevice)resolve(g_tracker_module, "sceVrTrackerRegisterDevice");
+    if (!reg)
+        return false;
+    int rc = reg(type, handle);
+    LOG("sceVrTrackerRegisterDevice(type %u, 0x%x) -> 0x%08x", type, handle, (unsigned)rc);
+    d->registered = rc >= 0;
+    return d->registered;
+}
+
+void tracker_unregister_device(TrackedDevice *d)
+{
+    if (!d->registered)
+        return;
+    auto unreg = (int (*)(int32_t))resolve(g_tracker_module, "sceVrTrackerUnregisterDevice");
+    if (unreg)
+        LOG("sceVrTrackerUnregisterDevice(0x%x) -> 0x%08x", d->handle, (unsigned)unreg(d->handle));
+    d->registered = false;
+}
+
+void tracker_update_device(TrackedDevice *d)
+{
+    if (!d->registered)
+        return;
+    GetResultParam gp;
+    memset(&gp, 0, sizeof(gp));
+    gp.size = sizeof(gp);
+    gp.handle = d->handle;
+    gp.result_type = RESULT_PREDICTED;
+    gp.orientation_type = ORIENTATION_ABSOLUTE;
+    p_get_time(&gp.prediction_time);
+    alignas(16) static uint8_t buf[16384];
+    memset(buf, 0, sizeof(buf));
+    int rc = p_get_result(&gp, buf);
+    if (rc != d->last_rc) {
+        LOG("sceVrTrackerGetResult(0x%x) -> 0x%08x", d->handle, (unsigned)rc);
+        d->last_rc = rc;
+    }
+    if (rc < 0)
+        return;
+    const ResultData *r = (const ResultData *)buf;
+    if (r->status != d->status || r->position_quality != d->position_quality ||
+        r->orientation_quality != d->orientation_quality || r->led_color != d->led_color)
+        LOG("device 0x%x: status=%s pos=%s orient=%s led_color=%u", d->handle, tracker_status_name(r->status),
+            tracker_quality_name(r->position_quality), tracker_quality_name(r->orientation_quality), r->led_color);
+    d->status = r->status;
+    d->position_quality = r->position_quality;
+    d->orientation_quality = r->orientation_quality;
+    d->led_color = r->led_color;
+    d->timestamp = r->timestamp;
+    const TrackerPose &p = r->device_pose;
+    if (r->position_quality != 0) {
+        d->position[0] = p.px;
+        d->position[1] = p.py;
+        d->position[2] = p.pz;
+        d->has_position = true;
+    }
+    if (r->orientation_quality != 0) {
+        d->orientation[0] = p.qx;
+        d->orientation[1] = p.qy;
+        d->orientation[2] = p.qz;
+        d->orientation[3] = p.qw;
+        d->has_orientation = true;
+    }
 }

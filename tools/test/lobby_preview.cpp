@@ -18,6 +18,13 @@ int main(int argc, char **argv)
     v.fov[0] = EyeFov{1.2074f, 1.1813f, 1.2629f, 1.2629f};
     v.fov[1] = EyeFov{1.1813f, 1.2074f, 1.2629f, 1.2629f};
     v.floor_y = -1.47f;
+    for (int i = 0; i < 2; i++) {
+        v.controllers[i].visible = true;
+        v.controllers[i].pos = v3(i ? 0.2f : -0.2f, -0.55f, 0.55f);
+        v.controllers[i].rot = Quat{0.3827f, 0, 0, 0.9239f}; // tilted 45 deg around X
+        v.controllers[i].rgb = i ? 0xff00ff : 0x00ffff;
+        v.controllers[i].tracked = true;
+    }
     lobby_render(px, W, H, W, &v);
     FILE *f = fopen(argc > 1 ? argv[1] : "lobby.ppm", "wb");
     fprintf(f, "P6 %d %d 255\n", W, H);

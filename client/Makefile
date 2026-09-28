@@ -3,7 +3,7 @@
 #   make clean
 
 TITLE       := ALVR PS4
-VERSION     := 01.21
+VERSION     := 01.22
 TITLE_ID    := ALVR00001
 CONTENT_ID  := IV0000-ALVR00001_00-ALVRPS4CLIENT000
 
@@ -16,7 +16,7 @@ ATTRIBUTE   := 0x04004000
 # zeroes the 2D VR screen size/distance for SDK < 4.50; use Beat Saber's (5.50).
 SDK_VERSION := 0x05508001
 
-LIBS        := -lc -lkernel -lc++ -lSceVideoOut -lSceNetCtl -lSceSysmodule -lSceUserService -lSceSystemService -lSceGnmDriver
+LIBS        := -lc -lkernel -lc++ -lSceVideoOut -lSceNetCtl -lSceSysmodule -lSceUserService -lSceSystemService -lSceGnmDriver -lScePad
 
 TOOLCHAIN   ?= $(OO_PS4_TOOLCHAIN)
 BIN         := $(TOOLCHAIN)/bin/linux

@@ -15,16 +15,18 @@
 #include <orbis/Sysmodule.h>
 
 #include <orbis/SystemService.h>
+#include <orbis/Pad.h>
 #include <orbis/UserService.h>
 
 #include "hmd.h"
 #include "lobby.h"
+#include "move.h"
 #include "reproj.h"
 #include "log.h"
 #include "screen.h"
 #include "tracker.h"
 
-#define ALVR_PS4_VERSION "0.4.7 (stage 3: 3D lobby)"
+#define ALVR_PS4_VERSION "0.5.0 (PS Move)"
 
 static char g_ip[16] = "?";
 
@@ -104,6 +106,7 @@ static void probe_modules()
 static HmdState g_hmd;
 static int g_user_id = -1;
 static TrackerState g_tracker;
+static MoveController g_moves[MOVE_MAX];
 
 static void start_headset()
 {
@@ -122,7 +125,16 @@ static void start_headset()
         LOG("tracker started, HMD registered");
     else
         LOG("tracker start FAILED");
+    move_start(g_probes[2].handle, g_user_id, g_moves);
     tracker_run_thread();
+
+    // The DualShock 4 is not used: not registered with the tracker, light bar reset
+    // to the system's generic colour.
+    int rc_pad = scePadInit();
+    int pad = scePadOpen(g_user_id, 0, 0, nullptr);
+    LOG("scePadInit -> 0x%08x, scePadOpen -> 0x%08x", (unsigned)rc_pad, (unsigned)pad);
+    if (pad >= 0)
+        LOG("scePadResetLightBar -> 0x%08x", (unsigned)scePadResetLightBar(pad));
 }
 
 // System service: there is no "about to close" event for apps, the system kills the
@@ -208,6 +220,15 @@ static bool render_lobby(Screen *s)
     view.fov[0] = EyeFov{f.tan_out, f.tan_in, f.tan_top, f.tan_bottom};
     view.fov[1] = EyeFov{f.tan_in, f.tan_out, f.tan_top, f.tan_bottom};
     view.floor_y = floor_y;
+    for (int i = 0; i < MOVE_MAX; i++) {
+        const MoveController &m = g_moves[i];
+        LobbyView::Controller &c = view.controllers[i];
+        c.visible = m.connected && m.track.has_position;
+        c.pos = v3(m.track.position[0], m.track.position[1], m.track.position[2]);
+        c.rot = Quat{m.track.orientation[0], m.track.orientation[1], m.track.orientation[2], m.track.orientation[3]};
+        c.rgb = move_led_rgb(m.track.led_color);
+        c.tracked = m.track.position_quality == 9 || m.track.position_quality == 6;
+    }
     // Each eye gets its own 960x1080 image with pitch == width: with both eyes in one
     // 1920-wide buffer the compositor ignored the pitch and mixed the eyes row by row.
     static uint32_t *eye_buf[2][2]; // [double-buffer index][eye]
@@ -332,6 +353,7 @@ int main()
     unsigned frame = 0;
     for (;;) {
         tracker_update(&g_tracker);
+        move_update(g_moves);
         if (screen.handle > 0 && reproj_active()) {
             // 3D lobby once the tracker has an orientation, 2D status screen before that.
             bool stereo = g_tracker.results_ok && g_tracker.orientation_quality != 0 && render_lobby(&screen);

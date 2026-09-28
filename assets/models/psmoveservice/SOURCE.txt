@@ -1,0 +1,7 @@
+Source repository: https://github.com/psmoveservice/PSMoveService (branch master)
+License: Apache License 2.0 - https://github.com/psmoveservice/PSMoveService/blob/master/LICENSE
+Units: centimeters (same mesh as PSMoveSteamVRBridge ps3eye_tracker.obj scaled x100). Blender 2.76 OBJ export.
+
+PS3EyeCamera/PS3EyeCamera.obj   https://raw.githubusercontent.com/psmoveservice/PSMoveService/master/src/psmoveconfigtool/source_assets/PS3EyeCamera.obj
+PS3EyeCamera/PS3EyeCamera.mtl   https://raw.githubusercontent.com/psmoveservice/PSMoveService/master/src/psmoveconfigtool/source_assets/PS3EyeCamera.mtl
+PS3EyeCamera/PS3EyeDiffuse.jpg  https://raw.githubusercontent.com/psmoveservice/PSMoveService/master/src/psmoveconfigtool/assets/textures/PS3EyeDiffuse.jpg

@@ -17,6 +17,13 @@ struct LobbyView {
     Quat eye_rot[2];
     EyeFov fov[2];  // left, right
     float floor_y;  // tracker-space height of the floor
+    struct Controller {
+        bool visible;
+        Vec3 pos;      // sphere centre, tracker space
+        Quat rot;
+        uint32_t rgb;  // sphere colour
+        bool tracked;  // position currently seen by the camera
+    } controllers[2];
 };
 
 // One eye (0 = left, 1 = right) into its own image.

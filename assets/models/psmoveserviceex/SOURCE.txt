@@ -1,0 +1,17 @@
+Source repository: https://github.com/Timocop/PSMoveServiceEx (branch master-experimental)
+License: Apache License 2.0 - https://github.com/Timocop/PSMoveServiceEx/blob/master-experimental/LICENSE
+Note: the original PSVR (Morpheus) headset mesh in upstream PSMoveService is credited to Robert Merki under the MIT License:
+  https://raw.githubusercontent.com/psmoveservice/PSMoveService/master/src/psmoveconfigtool/source_assets/Morpheus/License.txt
+  (PSMorpheus*.obj here appears to be a Blender 3.3 re-export/remodel; keep that attribution to be safe.)
+Units: centimeters. Blender 3.3.20 OBJ exports, triangulated, no mtllib (texture is bound in code; use the *Diffuse.png as map_Kd).
+Blend sources exist at .../source_assets/*.blend in the same repo.
+
+PSMoveController.obj         https://raw.githubusercontent.com/Timocop/PSMoveServiceEx/master-experimental/src/psmoveconfigtool/assets/models/PSMoveController.obj
+PSMoveControllerBulb.obj     https://raw.githubusercontent.com/Timocop/PSMoveServiceEx/master-experimental/src/psmoveconfigtool/assets/models/PSMoveControllerBulb.obj
+PSMoveControllerDiffuse.png  https://raw.githubusercontent.com/Timocop/PSMoveServiceEx/master-experimental/src/psmoveconfigtool/assets/models/PSMoveControllerDiffuse.png
+PS3Eye.obj                   https://raw.githubusercontent.com/Timocop/PSMoveServiceEx/master-experimental/src/psmoveconfigtool/assets/models/PS3Eye.obj
+PS3EyeDiffuse.png            https://raw.githubusercontent.com/Timocop/PSMoveServiceEx/master-experimental/src/psmoveconfigtool/assets/models/PS3EyeDiffuse.png
+PSMorpheus.obj               https://raw.githubusercontent.com/Timocop/PSMoveServiceEx/master-experimental/src/psmoveconfigtool/assets/models/PSMorpheus.obj
+PSMorpheusBulb.obj           https://raw.githubusercontent.com/Timocop/PSMoveServiceEx/master-experimental/src/psmoveconfigtool/assets/models/PSMorpheusBulb.obj
+PSMorpheusLed.obj            https://raw.githubusercontent.com/Timocop/PSMoveServiceEx/master-experimental/src/psmoveconfigtool/assets/models/PSMorpheusLed.obj
+PSMorpheusDiffuse.png        https://raw.githubusercontent.com/Timocop/PSMoveServiceEx/master-experimental/src/psmoveconfigtool/assets/models/PSMorpheusDiffuse.png
