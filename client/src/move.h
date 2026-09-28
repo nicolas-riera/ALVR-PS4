@@ -17,6 +17,7 @@ struct MoveController {
     uint16_t trigger; // 0..255
     uint32_t sphere_color_set; // tracker colour index last applied, ~0 if none
     uint64_t sphere_sent_us;   // last sceMoveSetLightSphere, for the periodic refresh
+    uint32_t sphere_toggle;    // alternates 255/254 so each refresh is a new colour
     TrackedDevice track;
 };
 

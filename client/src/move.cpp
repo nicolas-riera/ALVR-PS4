@@ -118,13 +118,23 @@ void move_update(MoveController ctl[MOVE_MAX])
         }
 
         tracker_update_device(&c.track);
-        // Light the sphere with the colour the tracker expects to see, and re-send it
-        // every second: set once, the sphere went dark after a few seconds.
+        // Light the sphere with the colour the tracker expects to see and keep refreshing
+        // it: the controller turns the sphere off when it stops receiving commands, and
+        // libSceMove apparently drops requests identical to the previous one (re-sending the
+        // same colour every second still let it go dark). Alternating 255/254 on the lit
+        // channels makes every refresh a real command; the difference is invisible.
         uint64_t now = sceKernelGetProcessTime();
         if (connected && c.track.last_rc == 0 &&
-            (c.track.led_color != c.sphere_color_set || now - c.sphere_sent_us > 1000000)) {
+            (c.track.led_color != c.sphere_color_set || now - c.sphere_sent_us > 500000)) {
             uint32_t rgb = move_led_rgb(c.track.led_color);
-            rc = p_set_sphere(c.handle, rgb >> 16, (rgb >> 8) & 0xff, rgb & 0xff);
+            c.sphere_toggle ^= 1;
+            uint8_t r = rgb >> 16, g = (rgb >> 8) & 0xff, b = rgb & 0xff;
+            if (c.sphere_toggle) {
+                r -= r ? 1 : 0;
+                g -= g ? 1 : 0;
+                b -= b ? 1 : 0;
+            }
+            rc = p_set_sphere(c.handle, r, g, b);
             if (c.track.led_color != c.sphere_color_set || rc != 0)
                 LOG("move %d: sphere colour %u (#%06x) -> 0x%08x", i, c.track.led_color, rgb, (unsigned)rc);
             c.sphere_sent_us = now;

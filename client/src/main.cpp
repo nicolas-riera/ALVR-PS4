@@ -26,7 +26,7 @@
 #include "screen.h"
 #include "tracker.h"
 
-#define ALVR_PS4_VERSION "0.5.1 (PS Move)"
+#define ALVR_PS4_VERSION "0.5.2 (PS Move)"
 
 static char g_ip[16] = "?";
 
