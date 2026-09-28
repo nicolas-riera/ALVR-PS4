@@ -318,7 +318,7 @@ static const char *json_find(const char *json, size_t len, const char *key)
 static void write_capabilities(BinWriter &w)
 {
     static const char *caps =
-        "{\"default_view_resolution\":[960,1080],\"supported_refresh_rates\":[90.0,120.0],"
+        "{\"default_view_resolution\":[960,1080],\"supported_refresh_rates\":[60.0],"
         "\"microphone_sample_rate\":48000,\"supports_foveated_encoding\":false,\"encoder_high_profile\":true,"
         "\"encoder_10_bits\":false,\"encoder_av1\":false,\"multimodal_protocol\":false,\"prefer_10bit\":false,"
         "\"prefer_full_range\":true,\"preferred_encoding_gamma\":1.0,\"prefer_hdr\":false}";
@@ -326,9 +326,10 @@ static void write_capabilities(BinWriter &w)
     w.u32(960);
     w.u32(1080);
     size_t n = strlen(caps);
-    w.u64(2 + n);
-    w.f32(90.0f);
-    w.f32(120.0f);
+    // 60 Hz only: the hardware decoder takes ~13.5 ms per 1920x1056 frame, too slow for
+    // 90 Hz. The system compositor reprojects 60 Hz to the PSVR's 120 Hz, as games do.
+    w.u64(1 + n);
+    w.f32(60.0f);
     for (size_t i = 0; i < n; i++)
         w.f32(-(float)(uint8_t)caps[i]); // JSON smuggled as negative "refresh rates"
     w.u32(48000);

@@ -439,8 +439,13 @@ static void decode_one(Slot &s, bool more_pending, const uint8_t *config, size_t
     g_stats.decoded++;
     g_stats.decode_us_avg = (g_stats.decode_us_avg * 15 + (t1 - t0)) / 16;
     pthread_mutex_unlock(&g_lock);
-    if (!out.is_valid || more_pending)
-        return; // a newer frame is already waiting: only decode this one (references)
+    // With a newer frame already waiting, this one is only decoded (it is a reference),
+    // unless nothing was shown for 25 ms: a decoder that stays behind must not freeze the
+    // picture (conversion costs ~2 ms).
+    static uint64_t last_publish_us;
+    if (!out.is_valid || (more_pending && t1 - last_publish_us < 25000))
+        return;
+    last_publish_us = t1;
     g_fb_cur ^= 1;
 
     uint32_t fw = out.frame_width, fh = out.frame_height;
