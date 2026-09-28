@@ -3,6 +3,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "foveation.h"
 #include "reproj.h"
 
 // Video stream: H.264 hardware decoding with libSceVideodec2, then NV12 -> BGRA
@@ -13,7 +14,8 @@
 bool video_init(int videodec2_module);
 
 // Network thread side.
-void video_set_stream(uint32_t view_width, uint32_t view_height, bool full_range);
+// view_*: one eye as displayed. ffe: foveated encoding settings, or null when it is off.
+void video_set_stream(uint32_t view_width, uint32_t view_height, bool full_range, const FoveationSettings *ffe);
 void video_set_decoder_config(uint32_t codec /*0 H264, 1 HEVC*/, const uint8_t *config, size_t len);
 // One complete access unit (Annex B, SPS/PPS stripped by the streamer). Copied.
 void video_push_frame(uint64_t timestamp_ns, bool is_idr, const uint8_t *data, size_t len);

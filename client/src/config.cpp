@@ -14,7 +14,7 @@ static const char *CONFIG_PATH = "/data/alvr-ps4/config.txt";
 void config_load(ClientConfig *cfg)
 {
     memset(cfg, 0, sizeof(*cfg));
-    cfg->resolution_percent = 107; // 1024x1152 per eye: a 2048-pixel-wide stream
+    cfg->resolution_percent = 130; // 1248x1404 per eye; foveated encoding keeps the decoded frame at 1920x1056
     cfg->controller_prediction_ms = 0;
     FILE *f = fopen(CONFIG_PATH, "r");
     if (f) {
@@ -30,7 +30,7 @@ void config_load(ClientConfig *cfg)
         fclose(f);
     }
     if (cfg->resolution_percent < 50 || cfg->resolution_percent > 160)
-        cfg->resolution_percent = 107;
+        cfg->resolution_percent = 130;
     if (cfg->controller_prediction_ms < 0 || cfg->controller_prediction_ms > 60)
         cfg->controller_prediction_ms = 0;
     if (cfg->hostname[0]) {

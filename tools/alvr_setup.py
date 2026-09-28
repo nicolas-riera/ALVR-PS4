@@ -1,9 +1,11 @@
 """Configure the ALVR 20.14.1 streamer (PC side) for the PS4 client.
 
 Applies every setting the PS4 client needs (see README.md, "ALVR streamer settings"):
-  - video: H.264 (the PS4 decodes H.264 only), foveated encoding off (the client cannot
-    undo it, and leaving it on makes the streamer restart SteamVR at every connection),
-    60 fps preferred (the client only offers 60 Hz);
+  - video: H.264 (the PS4 decodes H.264 only), 60 fps preferred (the client only offers
+    60 Hz), foveated encoding on with PSVR settings: the center half of each eye keeps the
+    full resolution and the edges are squeezed 2:1, so at the client's default 130%
+    resolution (1248x1408 per eye) the PS4 decodes a 1920x1056 frame, the size its decoder
+    handles quickly (above it, decoding took up to 17 ms per frame in busy scenes);
   - headset identity (PlayStation VR, same tracking system and universe as the controllers);
   - encoder quality: the "Quality" preset (NVENC P4) at 60 Mbps instead of the fastest
     preset at 30 Mbps, which blurred text (the PC's GPU pays for it, not the PS4);
@@ -32,6 +34,14 @@ ARGS = [a for a in sys.argv[1:] if not a.startswith("--")]
 SESSION = ARGS[0] if ARGS else r"C:\Users\habbo\Downloads\alvr_streamer_windows\session.json"
 MIC = "--mic" in sys.argv
 BITRATE_MBPS = 60
+FOVEATION = {
+    "center_size_x": 0.5,
+    "center_size_y": 0.5,
+    "center_shift_x": 0.0,
+    "center_shift_y": 0.0,
+    "edge_ratio_x": 2.0,
+    "edge_ratio_y": 2.0,
+}
 
 # client path suffix -> Vive destination suffix
 BUTTON_PAIRS = [
@@ -109,7 +119,9 @@ def main():
 
     video = ss["video"]
     video["preferred_codec"]["variant"] = "H264"
-    video["foveated_encoding"]["enabled"] = False
+    fov = video["foveated_encoding"]
+    fov["enabled"] = True
+    fov["content"].update(FOVEATION)
     video["preferred_fps"] = 60.0
     enc = video["encoder_config"]
     enc["quality_preset"]["variant"] = "Quality"

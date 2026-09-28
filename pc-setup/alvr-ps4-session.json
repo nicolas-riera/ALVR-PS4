@@ -166,16 +166,16 @@
         "variant": "H264"
       },
       "foveated_encoding": {
-        "enabled": false,
+        "enabled": true,
         "content": {
           "gui_collapsed": true,
           "force_enable": false,
-          "center_size_x": 0.45,
-          "center_size_y": 0.4,
-          "center_shift_x": 0.4,
-          "center_shift_y": 0.1,
-          "edge_ratio_x": 4.0,
-          "edge_ratio_y": 5.0
+          "center_size_x": 0.5,
+          "center_size_y": 0.5,
+          "center_shift_x": 0.0,
+          "center_shift_y": 0.0,
+          "edge_ratio_x": 2.0,
+          "edge_ratio_y": 2.0
         }
       },
       "color_correction": {

@@ -347,7 +347,7 @@ static void write_capabilities(BinWriter &w)
     static char caps[640];
     snprintf(caps, sizeof(caps),
              "{\"default_view_resolution\":[%u,%u],\"supported_refresh_rates\":[60.0],"
-             "\"microphone_sample_rate\":48000,\"supports_foveated_encoding\":false,\"encoder_high_profile\":true,"
+             "\"microphone_sample_rate\":48000,\"supports_foveated_encoding\":true,\"encoder_high_profile\":true,"
              "\"encoder_10_bits\":false,\"encoder_av1\":false,\"multimodal_protocol\":false,\"prefer_10bit\":false,"
              "\"prefer_full_range\":true,\"preferred_encoding_gamma\":1.0,\"prefer_hdr\":false}",
              g_views.view_width, g_views.view_height);
@@ -514,9 +514,40 @@ static void run_session(int fd, uint32_t server_ip_be)
         bool full_range = true;
         if (const char *v = json_find(neg, nlen, "use_full_range"))
             full_range = strncmp(v, "true", 4) == 0;
+        // Foveated encoding: negotiated flag, parameters from the session settings
+        // ("foveated_encoding":{"enabled":..,"content":{..,"center_size_x":..}}).
+        FoveationSettings ffe{};
+        bool use_ffe = false;
+        if (const char *v = json_find(neg, nlen, "enable_foveated_encoding"))
+            use_ffe = strncmp(v, "true", 4) == 0;
+        if (use_ffe) {
+            const char *f = json_find(session, slen, "foveated_encoding");
+            size_t flen = f ? (size_t)(session + slen - f) : 0;
+            if (flen > 400)
+                flen = 400;
+            struct {
+                const char *key;
+                float *value;
+            } keys[] = {{"center_size_x", &ffe.center_size_x},   {"center_size_y", &ffe.center_size_y},
+                        {"center_shift_x", &ffe.center_shift_x}, {"center_shift_y", &ffe.center_shift_y},
+                        {"edge_ratio_x", &ffe.edge_ratio_x},     {"edge_ratio_y", &ffe.edge_ratio_y}};
+            for (auto &k : keys) {
+                const char *v = f ? json_find(f, flen, k.key) : nullptr;
+                if (!v) {
+                    LOG("alvr: foveated encoding setting %s not found, expansion off", k.key);
+                    use_ffe = false;
+                    break;
+                }
+                *k.value = strtof(v, nullptr);
+            }
+            if (use_ffe)
+                LOG("alvr: foveated encoding center %.2fx%.2f shift %.2f,%.2f edge ratio %.1fx%.1f",
+                    ffe.center_size_x, ffe.center_size_y, ffe.center_shift_x, ffe.center_shift_y, ffe.edge_ratio_x,
+                    ffe.edge_ratio_y);
+        }
         video_reset();
         reassembly_reset();
-        video_set_stream(vw, vh, full_range);
+        video_set_stream(vw, vh, full_range, use_ffe ? &ffe : nullptr);
         uint32_t game_audio_rate = 0;
         if (const char *v = json_find(neg, nlen, "game_audio_sample_rate"))
             game_audio_rate = (uint32_t)atoi(v);

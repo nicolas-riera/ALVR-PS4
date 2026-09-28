@@ -32,7 +32,7 @@
 #include "audio.h"
 #include "video.h"
 
-#define ALVR_PS4_VERSION "0.9.2"
+#define ALVR_PS4_VERSION "0.9.3"
 
 static char g_ip[16] = "?";
 

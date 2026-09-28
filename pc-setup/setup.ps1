@@ -143,7 +143,7 @@ if (Test-Path $Session) {
 $json = [IO.File]::ReadAllText($Template)
 $json = $json.Replace('"variant": "VAC"', '"variant": "' + $micPreset + '"')
 [IO.File]::WriteAllText($Session, $json, (New-Object Text.UTF8Encoding $false))
-Info "Applied (H.264, 60 fps, Vive wands, PS Move buttons, game audio, microphone: $micPreset)"
+Info "Applied (H.264, 60 fps, foveated encoding, Vive wands, PS Move buttons, game audio, microphone: $micPreset)"
 
 # --- Firewall ------------------------------------------------------------------------
 Step "Firewall (ALVR ports 9943-9944)"

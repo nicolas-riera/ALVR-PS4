@@ -85,7 +85,7 @@ device properties → Advanced), the only rate the PS4 plays.
 | Setting | Value | Why |
 | --- | --- | --- |
 | Video → Preferred codec | **H264** | the PS4 hardware decoder is used for H.264 only |
-| Video → Foveated encoding | **off** | the client cannot undo it; left on, ALVR restarts SteamVR at every connection |
+| Video → Foveated encoding | **on**: center region width 0.5, height 0.5, center shift X 0, Y 0, horizontal and vertical edge ratio 2 | keeps the center of each eye at full resolution and squeezes the edges 2:1 (the lenses blur them anyway): at the default 130% resolution the PS4 decodes a 1920×1056 frame instead of 2496×1408, the size its decoder handles quickly. The client reads these values from the streamer, so other values work too; a smaller center or a higher edge ratio decodes faster but blurs more of the view |
 | Video → Preferred FPS | **60** | the client offers 60 Hz (the PSVR reprojects it to 120 Hz) |
 | Video → Encoder → Quality preset | **Quality** (NVENC: **P4**) | the fastest preset blurs text; the PC's GPU pays for it, not the PS4 |
 | Video → Bitrate | **Constant, 60 Mbps** | 30 Mbps is too low for readable text |
@@ -190,7 +190,8 @@ SteamVR's grey screen, after 3 s (needs the driver patch).
 | Symptom | Fix |
 | --- | --- |
 | Lobby says "Waiting for the PC" | Is the dashboard running and the PS4 trusted? Are the PC and PS4 on the same network? Check the ALVR firewall rules (the dashboard's setup wizard adds them) |
-| "SteamVR is restarting" at every connection | Foveated encoding is still on (see the settings table) |
+| "SteamVR is restarting" at every connection | Normal once after changing the resolution or the foveated encoding settings. At every connection: the PS4 client is older than v0.9.3 (it did not support foveated encoding); update it or turn foveated encoding off |
+| Stream stutters in busy scenes (log: `decode` above 10 ms) | Foveated encoding off, or a resolution too high for it: the decoded frame (log line `video: ... decoded frame WxH`) should stay within 1920×1088 |
 | Controllers greyed out / "standby" in SteamVR | Controller activation timed out: disable unused SteamVR add-ons, then restart SteamVR |
 | SteamVR shows Oculus Touch controllers or wrong bindings | Missing `InputProfilePathString` extra OpenVR prop |
 | START does nothing | Button mappings not applied (run `tools/alvr_setup.py`) |
@@ -219,6 +220,7 @@ OpenSSL 1.1 in `~/ps4/libssl11` (PkgTool needs it; Debian 13 no longer ships it)
 | `client/src/main.cpp` | startup, main loop (60 Hz), lobby/video display, tracking uplink |
 | `client/src/alvr_client.*` | ALVR 20.14.1 protocol: discovery, handshake, streams, video reassembly |
 | `client/src/video.*` | hardware H.264 decoding (libSceVideodec2), NV12 → RGB |
+| `client/src/foveation.*` | foveated encoding math (expansion of the squeezed eye edges), same as the official client |
 | `client/src/audio.*` | game audio playback (libSceAudioOut) and microphone capture (libSceAudioIn) |
 | `client/src/hmd.*`, `reproj.*`, `screen.*` | PSVR (libSceHmd) and the system reprojection |
 | `client/src/tracker.*`, `camera.*`, `move.*`, `wand.*` | camera tracking (libSceVrTracker), PS Move, Vive wand emulation |
@@ -235,5 +237,5 @@ it over GoldHEN's FTP server, then restart the app:
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `hostname` | random `NNNN.client` | the name the PS4 announces to ALVR |
-| `resolution_percent` | `107` | stream resolution per eye, in percent of the PSVR panel (960×1080), 50–160. 107 (1024×1152) keeps the stream 2048 pixels wide; above, decoding became several times slower |
+| `resolution_percent` | `130` | resolution per eye, in percent of the PSVR panel (960×1080), 50–160. The PS4 decoder slows down sharply above about 1920×1088 per frame (both eyes): with foveated encoding at the recommended settings, 130% decodes a 1920×1056 frame. Without foveated encoding, use 100 |
 | `controller_prediction_ms` | `0` | extra controller prediction on top of SteamVR's, 0–60 |
