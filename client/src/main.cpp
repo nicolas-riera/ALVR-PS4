@@ -30,7 +30,7 @@
 #include "screen.h"
 #include "tracker.h"
 
-#define ALVR_PS4_VERSION "0.7.0"
+#define ALVR_PS4_VERSION "0.7.1"
 
 static char g_ip[16] = "?";
 
@@ -381,7 +381,7 @@ static void start_alvr()
         views.fov[e][2] = atanf(f.tan_top);
         views.fov[e][3] = -atanf(f.tan_bottom);
     }
-    alvr_start(g_config.hostname, &views, haptics_to_move);
+    alvr_start(g_config.hostname, g_ip, &views, haptics_to_move);
 }
 
 // Tracker space (origin at the PS Camera, +Y up, user looking at -Z) to ALVR stage space

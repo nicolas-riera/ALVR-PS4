@@ -44,7 +44,7 @@ struct AlvrHandInput {
 typedef void (*AlvrHapticsCallback)(int hand /*0 left, 1 right*/, float duration_s, float frequency,
                                     float amplitude);
 
-void alvr_start(const char *hostname, const AlvrViews *views, AlvrHapticsCallback haptics);
+void alvr_start(const char *hostname, const char *local_ip, const AlvrViews *views, AlvrHapticsCallback haptics);
 void alvr_get_status(AlvrStatus *out);
 
 // Uplink, called from the render loop. timestamp_ns must be strictly increasing.

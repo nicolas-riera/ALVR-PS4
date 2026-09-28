@@ -39,6 +39,7 @@ enum : uint32_t { S_START_STREAM = 0, S_DECODER_CONFIG = 1, S_RESTARTING = 2, S_
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static AlvrStatus g_status;
 static char g_hostname[33];
+static char g_local_ip[16];
 static AlvrViews g_views;
 static AlvrHapticsCallback g_haptics;
 
@@ -535,11 +536,24 @@ static void *net_thread(void *)
     fcntl(listener, F_SETFL, fcntl(listener, F_GETFL, 0) | O_NONBLOCK);
     LOG("alvr: announcing %s (protocol 20) on UDP %u, listening on TCP %u", g_hostname, CONTROL_PORT, CONTROL_PORT);
 
+    // Also send to the subnet broadcast (x.y.z.255 for a /24): the limited broadcast
+    // 255.255.255.255 did not reliably reach the streamer.
+    sockaddr_in subnet = bcast;
+    if (g_local_ip[0]) {
+        in_addr ip{};
+        if (inet_pton(AF_INET, g_local_ip, &ip) == 1) {
+            subnet.sin_addr.s_addr = (ip.s_addr & htonl(0xffffff00)) | htonl(0xff);
+        }
+    }
     uint64_t last_announce = 0;
+    unsigned announces = 0;
     for (;;) {
         uint64_t t = now_us();
         if (t - last_announce >= 1000000) {
-            sendto(announce, packet, sizeof(packet), 0, (sockaddr *)&bcast, sizeof(bcast));
+            ssize_t r1 = sendto(announce, packet, sizeof(packet), 0, (sockaddr *)&bcast, sizeof(bcast));
+            ssize_t r2 = sendto(announce, packet, sizeof(packet), 0, (sockaddr *)&subnet, sizeof(subnet));
+            if (announces++ % 30 == 0)
+                LOG("alvr: announce #%u -> 255.255.255.255: %d, subnet: %d", announces, (int)r1, (int)r2);
             last_announce = t;
         }
         sockaddr_in peer{};
@@ -586,9 +600,10 @@ static void init_paths()
     }
 }
 
-void alvr_start(const char *hostname, const AlvrViews *views, AlvrHapticsCallback haptics)
+void alvr_start(const char *hostname, const char *local_ip, const AlvrViews *views, AlvrHapticsCallback haptics)
 {
     snprintf(g_hostname, sizeof(g_hostname), "%s", hostname);
+    snprintf(g_local_ip, sizeof(g_local_ip), "%s", local_ip);
     g_views = *views;
     g_haptics = haptics;
     memset(&g_status, 0, sizeof(g_status));
