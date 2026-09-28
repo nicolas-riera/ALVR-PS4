@@ -118,11 +118,16 @@ void move_update(MoveController ctl[MOVE_MAX])
         }
 
         tracker_update_device(&c.track);
-        // Light the sphere with the colour the tracker expects to see.
-        if (connected && c.track.last_rc == 0 && c.track.led_color != c.sphere_color_set) {
+        // Light the sphere with the colour the tracker expects to see, and re-send it
+        // every second: set once, the sphere went dark after a few seconds.
+        uint64_t now = sceKernelGetProcessTime();
+        if (connected && c.track.last_rc == 0 &&
+            (c.track.led_color != c.sphere_color_set || now - c.sphere_sent_us > 1000000)) {
             uint32_t rgb = move_led_rgb(c.track.led_color);
             rc = p_set_sphere(c.handle, rgb >> 16, (rgb >> 8) & 0xff, rgb & 0xff);
-            LOG("move %d: sphere colour %u (#%06x) -> 0x%08x", i, c.track.led_color, rgb, (unsigned)rc);
+            if (c.track.led_color != c.sphere_color_set || rc != 0)
+                LOG("move %d: sphere colour %u (#%06x) -> 0x%08x", i, c.track.led_color, rgb, (unsigned)rc);
+            c.sphere_sent_us = now;
             if (rc == 0)
                 c.sphere_color_set = c.track.led_color;
         }

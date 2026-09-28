@@ -26,7 +26,7 @@
 #include "screen.h"
 #include "tracker.h"
 
-#define ALVR_PS4_VERSION "0.5.0 (PS Move)"
+#define ALVR_PS4_VERSION "0.5.1 (PS Move)"
 
 static char g_ip[16] = "?";
 
@@ -238,7 +238,9 @@ static bool render_lobby(Screen *s)
         const size_t total = (each * 4 + align - 1) / align * align;
         off_t phys = 0;
         void *mem = nullptr;
-        if (sceKernelAllocateDirectMemory(0, sceKernelGetDirectMemorySize(), total, align, 3, &phys) < 0 ||
+        // WB onion (type 0), CPU-cached: the renderer reads pixels back (AA blending),
+        // which is extremely slow on write-combined garlic memory. The GPU reads onion too.
+        if (sceKernelAllocateDirectMemory(0, sceKernelGetDirectMemorySize(), total, align, 0, &phys) < 0 ||
             sceKernelMapDirectMemory(&mem, total, 0x33, 0, phys, align) < 0) {
             LOG("lobby: eye buffer allocation failed");
             return false;
@@ -248,6 +250,7 @@ static bool render_lobby(Screen *s)
     }
     static int cur = 0;
     static GnmTexture eye_tex[2][2];
+    uint64_t t0 = sceKernelGetProcessTime();
     for (int eye = 0; eye < 2; eye++) {
         lobby_render_eye(eye_buf[cur][eye], eye_w, eye_h, eye_w, &view, eye);
         gnm_texture_linear_bgra(&eye_tex[cur][eye], eye_buf[cur][eye], eye_w, eye_h, eye_w);
@@ -275,7 +278,24 @@ static bool render_lobby(Screen *s)
     pose.position[0] = tp.px;
     pose.position[1] = tp.py;
     pose.position[2] = tp.pz;
+    uint64_t t1 = sceKernelGetProcessTime();
     bool ok = reproj_submit_stereo(&eye_tex[cur][0], &eye_tex[cur][1], fov_block[0], fov_block[1], &pose) == 0;
+    // Timing report every 5 s: render cost and effective frame rate.
+    static uint64_t stat_start = 0, render_sum = 0, render_max = 0;
+    static unsigned stat_frames = 0;
+    if (!stat_start)
+        stat_start = t0;
+    render_sum += t1 - t0;
+    if (t1 - t0 > render_max)
+        render_max = t1 - t0;
+    stat_frames++;
+    if (t1 - stat_start >= 5000000) {
+        LOG("lobby: %.1f fps, render avg %.2f ms max %.2f ms", stat_frames * 1e6 / (double)(t1 - stat_start),
+            render_sum / 1000.0 / stat_frames, render_max / 1000.0);
+        stat_start = t1;
+        render_sum = render_max = 0;
+        stat_frames = 0;
+    }
     cur ^= 1;
     return ok;
 }
@@ -369,7 +389,15 @@ int main()
             // the app hangs, then ends in CE-34878-0.
             sceGnmSubmitDone();
             screen.cur ^= 1;
-            sceKernelUsleep(16000); // ~60 Hz; the compositor re-displays at the headset rate
+            // Pace to 60 Hz from the frame start (the compositor re-displays at 120 Hz).
+            // Sleeping a fixed 16 ms after rendering made every frame render + 16 ms long.
+            static uint64_t next_us = 0;
+            uint64_t now_us = sceKernelGetProcessTime();
+            if (next_us == 0 || now_us > next_us + 50000)
+                next_us = now_us;
+            next_us += 16667;
+            if (next_us > now_us)
+                sceKernelUsleep((uint32_t)(next_us - now_us));
         } else if (screen.handle > 0) {
             draw(&screen, frame);
             screen_flip(&screen);

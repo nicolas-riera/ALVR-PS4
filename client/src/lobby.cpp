@@ -192,10 +192,11 @@ static void draw_controller(const EyeTarget &t, const LobbyView::Controller &c)
 void lobby_render_eye(uint32_t *pixels, int width, int height, int pitch, const LobbyView *view, int eye)
 {
     const uint32_t bg = PIXEL_ALPHA | 0x06080c;
+    const uint64_t bg2 = (uint64_t)bg << 32 | bg;
     for (int yy = 0; yy < height; yy++) {
-        uint32_t *row = pixels + (size_t)yy * pitch;
-        for (int xx = 0; xx < width; xx++)
-            row[xx] = bg;
+        uint64_t *row = (uint64_t *)(pixels + (size_t)yy * pitch);
+        for (int xx = 0; xx < width / 2; xx++)
+            row[xx] = bg2;
     }
     EyeTarget t;
     t.pixels = pixels;
