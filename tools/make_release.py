@@ -20,7 +20,7 @@ OUT = os.path.join(ROOT, "release")
 HEADER = """<# : ALVR PS4 - PC setup. Double-click this file (it asks for administrator rights).
 @echo off
 rem Batch part: runs the PowerShell part below (this whole file, as PowerShell).
-rem Optional argument: install folder (default %LOCALAPPDATA%\\Programs\\ALVR-PS4).
+rem Optional argument: install folder (default: the folder of this file).
 set "ALVR_PS4_BAT=%~f0"
 set "ALVR_PS4_DIR=%~1"
 powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Invoke-Expression ([IO.File]::ReadAllText($env:ALVR_PS4_BAT))"

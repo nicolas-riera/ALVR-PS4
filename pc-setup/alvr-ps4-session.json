@@ -1760,9 +1760,9 @@
             "hide_spammy_events": false
           }
         },
-        "log_to_disk": true,
-        "log_tracking": true,
-        "log_button_presses": true,
+        "log_to_disk": false,
+        "log_tracking": false,
+        "log_button_presses": false,
         "log_haptics": false,
         "debug_groups": {
           "server_impl": false,

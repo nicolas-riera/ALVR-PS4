@@ -22,7 +22,9 @@ $VbCableUrl = "https://download.vb-audio.com/Download_CABLE/VBCABLE_Driver_Pack4
 $TemplateGz = "@@SESSION_TEMPLATE@@"
 
 $InstallDir = $env:ALVR_PS4_DIR
-if (-not $InstallDir) { $InstallDir = Join-Path $env:LOCALAPPDATA "Programs\ALVR-PS4" }
+# Default: the folder holding the .bat (not the current directory, which is System32 once
+# elevated).
+if (-not $InstallDir) { $InstallDir = Split-Path -Parent $env:ALVR_PS4_BAT }
 
 function Step($text) { Write-Host ""; Write-Host "== $text" -ForegroundColor Cyan }
 function Info($text) { Write-Host "   $text" }
@@ -72,15 +74,6 @@ function Test-AlvrDriverFolder($dir) {
     try { return ([IO.File]::ReadAllText($manifest) | ConvertFrom-Json).name -eq "alvr_server" } catch { return $false }
 }
 
-# An ALVR 20.14.1 streamer folder: its driver, or the backup of it, is the 20.14.1 one.
-function Test-Alvr20141($dir) {
-    $dll = Join-Path $dir "bin\win64\driver_alvr_server.dll"
-    foreach ($f in @($dll, "$dll.orig")) {
-        if ((Test-Path $f) -and (Get-FileHash -Algorithm SHA256 -Path $f).Hash -eq $DriverSha256) { return $true }
-    }
-    return $false
-}
-
 function HexBytes($hex) { [byte[]]($hex -split '(..)' | Where-Object { $_ } | ForEach-Object { [Convert]::ToByte($_, 16) }) }
 
 try {
@@ -100,30 +93,28 @@ try {
     # --- ALVR streamer 20.14.1 -------------------------------------------------------
     Step "ALVR streamer 20.14.1"
     $registered = @(Get-SteamVrDrivers | Where-Object { Test-AlvrDriverFolder $_ })
-    $Streamer = $null
-    if (-not $env:ALVR_PS4_DIR) {
-        # Reuse a 20.14.1 install SteamVR already knows instead of downloading a second one.
-        $Streamer = $registered | Where-Object { Test-Alvr20141 $_ } | Select-Object -First 1
-    }
-    if ($Streamer) {
-        Info "Using the existing install in $Streamer"
+    $Streamer = Join-Path $InstallDir "alvr_streamer_windows"
+    if (Test-Path (Join-Path $Streamer "ALVR Dashboard.exe")) {
+        Info "Already installed in $Streamer"
     } else {
-        $Streamer = Join-Path $InstallDir "alvr_streamer_windows"
-        if (Test-Path (Join-Path $Streamer "ALVR Dashboard.exe")) {
-            Info "Already installed in $Streamer"
-        } else {
-            New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-            $zip = Join-Path $env:TEMP "alvr_streamer_windows_20.14.1.zip"
-            if (-not (Test-Path $zip) -or (Get-Item $zip).Length -ne $AlvrZipSize) {
-                Info "Downloading $AlvrUrl (83 MB)..."
-                Invoke-WebRequest -Uri $AlvrUrl -OutFile $zip -UseBasicParsing
-            }
-            if ((Get-Item $zip).Length -ne $AlvrZipSize) { throw "The ALVR download is incomplete, run the setup again." }
-            Info "Extracting..."
-            Expand-Archive -Path $zip -DestinationPath $InstallDir -Force
-            if (-not (Test-Path (Join-Path $Streamer "ALVR Dashboard.exe"))) { throw "ALVR Dashboard.exe not found after extraction." }
-            Info "Installed in $Streamer"
+        New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
+        $zip = Join-Path $env:TEMP "alvr_streamer_windows_20.14.1.zip"
+        if (-not (Test-Path $zip) -or (Get-Item $zip).Length -ne $AlvrZipSize) {
+            Info "Downloading $AlvrUrl (83 MB)..."
+            Invoke-WebRequest -Uri $AlvrUrl -OutFile $zip -UseBasicParsing
         }
+        if ((Get-Item $zip).Length -ne $AlvrZipSize) { throw "The ALVR download is incomplete, run the setup again." }
+        Info "Extracting..."
+        # The 20.14.1 zip has no top-level folder: extract straight into $Streamer, and
+        # flatten a nested alvr_streamer_windows folder should a zip ever have one.
+        Expand-Archive -Path $zip -DestinationPath $Streamer -Force
+        $nested = Join-Path $Streamer "alvr_streamer_windows"
+        if (-not (Test-Path (Join-Path $Streamer "ALVR Dashboard.exe")) -and (Test-Path (Join-Path $nested "ALVR Dashboard.exe"))) {
+            Get-ChildItem -Force $nested | Move-Item -Destination $Streamer -Force
+            Remove-Item $nested -Recurse -Force
+        }
+        if (-not (Test-Path (Join-Path $Streamer "ALVR Dashboard.exe"))) { throw "ALVR Dashboard.exe not found after extraction." }
+        Info "Installed in $Streamer"
     }
     $Dashboard = Join-Path $Streamer "ALVR Dashboard.exe"
 

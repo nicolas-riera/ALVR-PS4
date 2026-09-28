@@ -50,9 +50,8 @@ Install SteamVR from Steam first. Then double-click **`ALVR-PS4-Setup.bat`** (fr
 Releases page) and accept the administrator prompt. It:
 
 1. closes the ALVR dashboard and SteamVR if they run;
-2. downloads ALVR streamer **20.14.1** into `%LOCALAPPDATA%\Programs\ALVR-PS4\alvr_streamer_windows`
-   (skipped if already there, or if SteamVR already knows an ALVR 20.14.1 install, which is
-   then reused);
+2. downloads ALVR streamer **20.14.1** into `alvr_streamer_windows\`, next to the .bat
+   (skipped if already there; any other ALVR driver registered with SteamVR is unregistered);
 3. patches its SteamVR driver (see "Driver patches" below; the download is checked by its
    SHA-256 first, and the original is kept as `driver_alvr_server.dll.orig`);
 4. installs [VB-Audio Virtual Cable](https://vb-audio.com/Cable/) for the microphone,
