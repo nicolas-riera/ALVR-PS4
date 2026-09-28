@@ -1,5 +1,10 @@
 # ALVR PS4
 
+> **Disclaimer: this whole project was entirely vibecoded.** Every line of code, every
+> script and this README were written by an AI (Claude), directed and tested on real
+> hardware by a human who did not write the code. It works on the setup it was tested on;
+> expect rough edges elsewhere, and use it at your own risk.
+
 Use a **PlayStation VR** headset as a **SteamVR** headset: this homebrew app for a jailbroken
 PS4 is an [ALVR](https://github.com/alvr-org/ALVR) client. The PC runs the ALVR streamer and
 SteamVR. The PS4 receives the video stream and shows it in the PSVR. It sends back the
@@ -9,10 +14,10 @@ The app behaves like a regular PSVR game: it uses the system VR mode (PSVR quick
 lens distortion, 120 Hz reprojection), and closing it from the PS4 menu puts the console
 back in normal mode.
 
-> Status: work in progress. Headset tracking, the PS Move controllers (emulated as HTC
-> Vive wands), the lobby, and 60 Hz video (hardware H.264 decoding, shown by the system
-> at 120 Hz through reprojection) work. Game audio and the microphone are new and still
-> being tested.
+> Status: headset tracking, the PS Move controllers (emulated as HTC Vive wands, with
+> vibration), the lobby, 60 Hz video (hardware H.264 decoding with foveated encoding, shown
+> by the system at 120 Hz through reprojection), game audio and the microphone work.
+> Tested with VRChat and Beat Saber on a PS4 Pro.
 
 ## Requirements
 
@@ -20,7 +25,7 @@ back in normal mode.
 | --- | --- |
 | PS4 | PS4 or PS4 Pro with [GoldHEN](https://github.com/GoldHEN/GoldHEN) (tested on a Pro, firmware 11.00) |
 | VR | PSVR (CUH-ZVR1 or ZVR2), PS Camera, two PS Move controllers |
-| PC | Windows, SteamVR, **ALVR streamer 20.14.1 exactly** ([release page](https://github.com/alvr-org/ALVR/releases/tag/v20.14.1), `ALVR-Windows.zip` or the portable streamer) |
+| PC | Windows 10 or 11, SteamVR, **ALVR streamer 20.14.1 exactly** (the setup below downloads it) |
 | Network | PC and PS4 on the same local network, PS4 on Ethernet (or at least 5 GHz Wi-Fi) |
 
 The PS4 client implements the ALVR **20.14.1** protocol only. ALVR changes its protocol
@@ -28,9 +33,12 @@ between versions, so any other streamer version will not connect.
 
 ## 1. Install the app on the PS4
 
+Both files come from the project's **Releases** page: `ALVR-PS4-v0.9.x.pkg` for the PS4 and
+`ALVR-PS4-Setup.bat` for the PC.
+
 1. Start GoldHEN on the PS4.
-2. Copy `IV0000-ALVR00001_00-ALVRPS4CLIENT000.pkg` to the console, either to a USB drive
-   or over GoldHEN's FTP server (port 2121, to `/data/pkg/`).
+2. Copy `ALVR-PS4-v0.9.x.pkg` to the console, either to a USB drive or over GoldHEN's FTP
+   server (port 2121, to `/data/pkg/`).
 3. In GoldHEN, open **Package Installer** and install the package. The app **ALVR PS4**
    appears on the home screen.
 
@@ -38,11 +46,13 @@ between versions, so any other streamer version will not connect.
 
 ### Automatic setup (recommended)
 
-Double-click **`pc-setup\Setup ALVR for PS4.bat`** and accept the administrator prompt. It:
+Install SteamVR from Steam first. Then double-click **`ALVR-PS4-Setup.bat`** (from the
+Releases page) and accept the administrator prompt. It:
 
 1. closes the ALVR dashboard and SteamVR if they run;
 2. downloads ALVR streamer **20.14.1** into `%LOCALAPPDATA%\Programs\ALVR-PS4\alvr_streamer_windows`
-   (skipped if already there);
+   (skipped if already there, or if SteamVR already knows an ALVR 20.14.1 install, which is
+   then reused);
 3. patches its SteamVR driver (see "Driver patches" below; the download is checked by its
    SHA-256 first, and the original is kept as `driver_alvr_server.dll.orig`);
 4. installs [VB-Audio Virtual Cable](https://vb-audio.com/Cable/) for the microphone,
@@ -50,11 +60,13 @@ Double-click **`pc-setup\Setup ALVR for PS4.bat`** and accept the administrator 
 5. writes the PS4 settings (the table below) into ALVR's `session.json`, after backing up
    any existing one;
 6. opens the ALVR ports (9943-9944, UDP and TCP) in the Windows firewall;
-7. registers the driver with SteamVR, creates an "ALVR (PS4)" desktop shortcut and starts
-   the dashboard.
+7. registers the driver with SteamVR (and unregisters any other ALVR version, which would
+   fight over the headset), creates an "ALVR (PS4)" desktop shortcut and starts the
+   dashboard.
 
-It is safe to run again. To install elsewhere:
-`"Setup ALVR for PS4.bat" -InstallDir D:\VR`.
+It is safe to run again. To install into another folder, run it from a command prompt:
+`ALVR-PS4-Setup.bat D:\VR`. The file is built from `pc-setup/setup.ps1` and
+`pc-setup/alvr-ps4-session.json` by `python tools/make_release.py`.
 
 ### Manual setup
 
@@ -228,7 +240,8 @@ OpenSSL 1.1 in `~/ps4/libssl11` (PkgTool needs it; Debian 13 no longer ships it)
 | `docs/alvr-20.14.1-protocol.md` | the ALVR 20.14.1 wire protocol, as implemented |
 | `tools/alvr_setup.py` | PC-side ALVR settings for this client |
 | `tools/alvr_driver_patch.py` | ALVR 20.14.1 driver patches: menu is not system, headset "searching" |
-| `pc-setup/` | one-click PC setup (`Setup ALVR for PS4.bat`, `setup.ps1`, settings template) |
+| `pc-setup/` | sources of the one-file PC setup (`setup.ps1`, settings template) |
+| `tools/make_release.py` | builds `release/` (`ALVR-PS4-v<version>.pkg`, `ALVR-PS4-Setup.bat`) for the GitHub release |
 | `tools/re/` | reverse-engineering helpers (headless Ghidra on dumped system modules) |
 
 The PS4 client's settings are stored in `/data/alvr-ps4/config.txt` on the console. Edit

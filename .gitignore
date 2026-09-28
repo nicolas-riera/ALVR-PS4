@@ -13,3 +13,4 @@ tools/fontgen/*.ttf
 *.args
 __pycache__/
 reference/alvr-20.14.1/
+release/
