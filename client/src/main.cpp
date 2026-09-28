@@ -29,9 +29,10 @@
 #include "log.h"
 #include "screen.h"
 #include "tracker.h"
+#include "audio.h"
 #include "video.h"
 
-#define ALVR_PS4_VERSION "0.8.3"
+#define ALVR_PS4_VERSION "0.9.0"
 
 static char g_ip[16] = "?";
 
@@ -140,6 +141,8 @@ static void start_headset()
     tracker_run_thread();
     if (!video_init(g_probes[5].handle))
         LOG("video decoder unavailable");
+    if (!audio_init(g_probes[6].handle, g_probes[7].handle, g_user_id, alvr_send_microphone))
+        LOG("audio unavailable");
     start_alvr();
 
     // The DualShock 4 is not used: not registered with the tracker, light bar reset
@@ -276,8 +279,10 @@ static bool find_sent_pose(uint64_t timestamp_ns, ReprojPose *out)
 static bool render_video()
 {
     VideoFrame vf;
-    if (!video_latest(&vf) || sceKernelGetProcessTime() - vf.decoded_us > 1500000)
+    if (!video_latest(&vf) || sceKernelGetProcessTime() - vf.decoded_us > 1500000) {
+        g_tracker_controller_prediction_us = 0; // lobby: show the Moves where they are
         return false;
+    }
     ReprojPose pose;
     if (!find_sent_pose(vf.timestamp_ns, &pose)) {
         // Unknown timestamp (0 = the streamer found no match): current pose, no warp.
@@ -299,19 +304,34 @@ static bool render_video()
     bool ok = reproj_submit_stereo(vf.eye[0], vf.eye[1], fov_block[0], fov_block[1], &pose) == 0;
     static uint64_t stat_start;
     static unsigned last_seq, shown;
+    // Motion-to-photon of the controllers: from the tracking sample a frame was rendered
+    // with to its display (next compositor vsync, ~8 ms after submission, 60 Hz loop).
+    // SteamVR already extrapolates 2.1 frames (35 ms at 60 Hz) with the velocities; the
+    // rest is predicted by the tracker, so the sabers are drawn where the hands are.
+    static uint64_t m2p_avg_us;
+    uint64_t now = sceKernelGetProcessTime();
     if (vf.seq != last_seq) {
         shown++;
         last_seq = vf.seq;
+        uint64_t sample_us = vf.timestamp_ns / 1000;
+        if (sample_us && now + 8000 > sample_us && now + 8000 - sample_us < 500000) {
+            uint64_t m2p = now + 8000 - sample_us;
+            m2p_avg_us = m2p_avg_us ? (m2p_avg_us * 31 + m2p) / 32 : m2p;
+            const uint64_t steamvr_us = 35000, max_us = 60000;
+            uint64_t p = m2p_avg_us > steamvr_us ? m2p_avg_us - steamvr_us : 0;
+            g_tracker_controller_prediction_us = (uint32_t)(p > max_us ? max_us : p);
+        }
     }
-    uint64_t now = sceKernelGetProcessTime();
     if (!stat_start)
         stat_start = now;
     if (now - stat_start >= 5000000) {
         VideoStats vs;
         video_get_stats(&vs);
-        LOG("video: shown %.1f fps | received %u decoded %u dropped %u errors %u | decode %.2f ms convert %.2f ms",
+        LOG("video: shown %.1f fps | received %u decoded %u dropped %u errors %u | decode %.2f ms convert %.2f ms | "
+            "queue %u | motion-to-photon %.1f ms, controller prediction %.1f ms",
             shown * 1e6 / (double)(now - stat_start), vs.received, vs.decoded, vs.dropped, vs.errors,
-            vs.decode_us_avg / 1000.0, vs.convert_us_avg / 1000.0);
+            vs.decode_us_avg / 1000.0, vs.convert_us_avg / 1000.0, vs.queue_max, m2p_avg_us / 1000.0,
+            g_tracker_controller_prediction_us / 1000.0);
         stat_start = now;
         shown = 0;
     }
@@ -524,6 +544,10 @@ static void send_alvr_uplink()
         int hand = move_index_hand(i) == HAND_LEFT ? 0 : 1;
         AlvrDeviceMotion &hm = hands[hand];
         to_stage(m.track.position, m.track.orientation, &hm);
+        // Tracker-space velocities (stage space only shifts y): SteamVR extrapolates the
+        // controllers with them over its own pipeline latency.
+        memcpy(hm.linear_velocity, m.track.velocity, sizeof(hm.linear_velocity));
+        memcpy(hm.angular_velocity, m.track.angular_velocity, sizeof(hm.angular_velocity));
         // Lost controllers keep their last pose for 10 s, then are omitted, which is how
         // the 20.14.1 protocol reports a controller that is not tracked.
         hm.present = m.connected && m.track.has_position && m.track.last_seen_us &&

@@ -4,6 +4,9 @@ Applies every setting the PS4 client needs (see README.md, "ALVR streamer settin
   - video: H.264 (the PS4 decodes H.264 only), foveated encoding off (the client cannot
     undo it, and leaving it on makes the streamer restart SteamVR at every connection),
     60 fps preferred (the client only offers 60 Hz);
+  - encoder quality: the "Quality" preset (NVENC P4) at 50 Mbps instead of the fastest
+    preset at 30 Mbps, which blurred text (the PC's GPU pays for it, not the PS4);
+  - game audio on; with --mic, the microphone too (needs VB-Audio Virtual Cable on the PC);
   - stream over UDP;
   - controllers: Vive wand emulation, hand skeleton off (PS Moves have no fingers),
     position/rotation offsets 0 (the default -11 cm is meant for Quest controllers and
@@ -16,7 +19,7 @@ The dashboard rewrites session.json while it runs: this waits until "ALVR Dashbo
 is closed, backs session.json up, then patches it. Run it again after an ALVR update or
 a settings reset; it is idempotent.
 
-Usage: python tools/alvr_setup.py [path\\to\\alvr_streamer_windows\\session.json]
+Usage: python tools/alvr_setup.py [--mic] [path\\to\\alvr_streamer_windows\\session.json]
 """
 import json
 import shutil
@@ -24,7 +27,10 @@ import subprocess
 import sys
 import time
 
-SESSION = sys.argv[1] if len(sys.argv) > 1 else r"C:\Users\habbo\Downloads\alvr_streamer_windows\session.json"
+ARGS = [a for a in sys.argv[1:] if not a.startswith("--")]
+SESSION = ARGS[0] if ARGS else r"C:\Users\habbo\Downloads\alvr_streamer_windows\session.json"
+MIC = "--mic" in sys.argv
+BITRATE_MBPS = 50
 
 # client path suffix -> Vive destination suffix
 BUTTON_PAIRS = [
@@ -86,6 +92,17 @@ def main():
     video["preferred_codec"]["variant"] = "H264"
     video["foveated_encoding"]["enabled"] = False
     video["preferred_fps"] = 60.0
+    enc = video["encoder_config"]
+    enc["quality_preset"]["variant"] = "Quality"
+    enc["nvenc"]["quality_preset"]["variant"] = "P4"
+    video["bitrate"]["mode"]["variant"] = "ConstantMbps"
+    video["bitrate"]["mode"]["ConstantMbps"] = BITRATE_MBPS
+
+    audio = ss["audio"]
+    audio["game_audio"]["enabled"] = True
+    if MIC:
+        audio["microphone"]["enabled"] = True
+        audio["microphone"]["content"]["devices"]["variant"] = "VAC"
     ss["connection"]["stream_protocol"]["variant"] = "Udp"
 
     controllers = ss["headset"]["controllers"]

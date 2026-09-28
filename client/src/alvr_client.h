@@ -1,5 +1,6 @@
 #pragma once
 
+#include <stddef.h>
 #include <stdint.h>
 
 // ALVR 20.14.1 client (headset side): discovery, control handshake, keepalive,
@@ -52,3 +53,5 @@ void alvr_get_status(AlvrStatus *out);
 void alvr_send_tracking(uint64_t timestamp_ns, const AlvrDeviceMotion *head, const AlvrDeviceMotion *left,
                         const AlvrDeviceMotion *right);
 void alvr_update_input(int hand, const AlvrHandInput *in);
+// Microphone uplink: s16le mono at 48 kHz, ~10 ms per call (any thread).
+void alvr_send_microphone(const uint8_t *pcm, size_t len);

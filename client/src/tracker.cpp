@@ -473,6 +473,8 @@ void tracker_unregister_device(TrackedDevice *d)
     d->registered = false;
 }
 
+volatile uint32_t g_tracker_controller_prediction_us = 0;
+
 void tracker_update_device(TrackedDevice *d)
 {
     if (!d->registered)
@@ -484,6 +486,7 @@ void tracker_update_device(TrackedDevice *d)
     gp.result_type = RESULT_PREDICTED;
     gp.orientation_type = ORIENTATION_ABSOLUTE;
     p_get_time(&gp.prediction_time);
+    gp.prediction_time += g_tracker_controller_prediction_us;
     alignas(16) static uint8_t buf[16384];
     memset(buf, 0, sizeof(buf));
     int rc = p_get_result(&gp, buf);
@@ -518,6 +521,10 @@ void tracker_update_device(TrackedDevice *d)
         d->orientation[2] = p.qz;
         d->orientation[3] = p.qw;
         d->has_orientation = true;
+    }
+    for (int i = 0; i < 3; i++) {
+        d->velocity[i] = r->position_quality != 0 ? r->velocity[i] : 0.0f;
+        d->angular_velocity[i] = r->orientation_quality != 0 ? r->angular_velocity[i] : 0.0f;
     }
 }
 

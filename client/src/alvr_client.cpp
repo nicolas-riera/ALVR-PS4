@@ -17,6 +17,7 @@
 
 #include "bincode.h"
 #include "log.h"
+#include "audio.h"
 #include "video.h"
 
 // ---------------------------------------------------------------------------------------
@@ -206,70 +207,94 @@ static void stream_send(uint16_t stream, const uint8_t *data, size_t len)
     pthread_mutex_unlock(&g_stream_send_lock);
 }
 
-// Video packet reassembly (docs section 1.4): one packet in flight; a shard of a newer
-// packet abandons an incomplete one. Any gap in packet indices is a loss, after which
-// frames are dropped until the next IDR (P-frames would reference missing data).
-static const size_t VIDEO_MAX_PACKET = 3 << 20;
-static const uint32_t VIDEO_MAX_SHARDS = 4096;
-static uint8_t *g_vbuf;
-static uint8_t g_vhave[VIDEO_MAX_SHARDS];
-static bool g_vactive, g_vhave_last;
-static uint32_t g_vindex, g_vshards, g_vgot, g_vlast;
-static size_t g_vlen;
+// Packet reassembly (docs section 1.4), one per stream: one packet in flight; a shard of
+// a newer packet abandons an incomplete one. Any gap in delivered packet indices is a loss.
+struct Reassembler {
+    size_t max_packet;
+    uint32_t max_shards;
+    uint8_t *buf, *have;
+    bool active, have_last;
+    uint32_t index, shards, got, last;
+    size_t len;
+};
 
-static void video_reassembly_reset()
+// Returns true when the packet `index` is complete (data in r.buf, r.len bytes).
+static bool reassemble(Reassembler &r, uint32_t index, uint32_t shards, uint32_t shard, const uint8_t *chunk,
+                       size_t chunk_len, bool *loss)
 {
-    g_vactive = false;
-    g_vhave_last = false;
+    const size_t d = (size_t)g_packet_size + 4 - SHARD_PREFIX;
+    if (!r.buf) {
+        r.buf = (uint8_t *)malloc(r.max_packet);
+        r.have = (uint8_t *)malloc(r.max_shards);
+    }
+    if (!r.buf || !r.have || shards == 0 || shards > r.max_shards || shard >= shards || chunk_len > d ||
+        (size_t)shards * d > r.max_packet)
+        return false;
+    if (r.have_last && (int32_t)(index - r.last) <= 0)
+        return false; // already delivered or older
+    if (!r.active || index != r.index) {
+        if (r.active && (int32_t)(index - r.index) < 0)
+            return false; // late shard of an abandoned packet
+        r.active = true;
+        r.index = index;
+        r.shards = shards;
+        r.got = 0;
+        r.len = 0;
+        memset(r.have, 0, shards);
+    }
+    if (shards != r.shards || r.have[shard])
+        return false;
+    r.have[shard] = 1;
+    r.got++;
+    memcpy(r.buf + shard * d, chunk, chunk_len);
+    if (shard == shards - 1)
+        r.len = shard * d + chunk_len;
+    if (r.got < r.shards)
+        return false;
+    r.active = false;
+    *loss = r.have_last && index != r.last + 1;
+    r.have_last = true;
+    r.last = index;
+    return true;
+}
+
+static Reassembler g_video_rx{3 << 20, 4096};
+static Reassembler g_audio_rx{256 << 10, 256};
+
+static void reassembly_reset()
+{
+    g_video_rx.active = g_video_rx.have_last = false;
+    g_audio_rx.active = g_audio_rx.have_last = false;
 }
 
 static void video_shard(uint32_t index, uint32_t shards, uint32_t shard, const uint8_t *chunk, size_t chunk_len)
 {
-    const size_t d = (size_t)g_packet_size + 4 - SHARD_PREFIX;
-    if (!g_vbuf)
-        g_vbuf = (uint8_t *)malloc(VIDEO_MAX_PACKET);
-    if (!g_vbuf || shards == 0 || shards > VIDEO_MAX_SHARDS || shard >= shards || chunk_len > d ||
-        (size_t)shards * d > VIDEO_MAX_PACKET)
+    bool loss = false;
+    if (!reassemble(g_video_rx, index, shards, shard, chunk, chunk_len, &loss))
         return;
-    if (g_vhave_last && (int32_t)(index - g_vlast) <= 0)
-        return; // already delivered or older
-    if (!g_vactive || index != g_vindex) {
-        if (g_vactive && (int32_t)(index - g_vindex) < 0)
-            return; // late shard of an abandoned packet
-        g_vactive = true;
-        g_vindex = index;
-        g_vshards = shards;
-        g_vgot = 0;
-        g_vlen = 0;
-        memset(g_vhave, 0, shards);
-    }
-    if (shards != g_vshards || g_vhave[shard])
-        return;
-    g_vhave[shard] = 1;
-    g_vgot++;
-    memcpy(g_vbuf + shard * d, chunk, chunk_len);
-    if (shard == shards - 1)
-        g_vlen = shard * d + chunk_len;
-    if (g_vgot < g_vshards)
-        return;
-    g_vactive = false;
-    bool loss = g_vhave_last && index != g_vlast + 1;
-    g_vhave_last = true;
-    g_vlast = index;
-    if (loss)
+    if (loss) // P-frames would reference missing data: drop until the next IDR
         video_packet_loss();
     // VideoPacketHeader { timestamp: Duration (u64 secs, u32 nanos), is_idr: bool }
-    if (g_vlen < 13)
+    const uint8_t *b = g_video_rx.buf;
+    if (g_video_rx.len < 13)
         return;
     uint64_t secs;
     uint32_t nanos;
-    memcpy(&secs, g_vbuf, 8);
-    memcpy(&nanos, g_vbuf + 8, 4);
-    bool idr = g_vbuf[12] != 0;
-    video_push_frame(secs * 1000000000ull + nanos, idr, g_vbuf + 13, g_vlen - 13);
+    memcpy(&secs, b, 8);
+    memcpy(&nanos, b + 8, 4);
+    bool idr = b[12] != 0;
+    video_push_frame(secs * 1000000000ull + nanos, idr, b + 13, g_video_rx.len - 13);
     pthread_mutex_lock(&g_lock);
     g_status.video_packets++;
     pthread_mutex_unlock(&g_lock);
+}
+
+// Game audio: header () then s16le stereo PCM.
+static void audio_shard(uint32_t index, uint32_t shards, uint32_t shard, const uint8_t *chunk, size_t chunk_len)
+{
+    bool loss = false;
+    if (reassemble(g_audio_rx, index, shards, shard, chunk, chunk_len, &loss))
+        audio_push_game(g_audio_rx.buf, g_audio_rx.len);
 }
 
 static void stream_poll()
@@ -296,6 +321,8 @@ static void stream_poll()
             }
         } else if (stream == STREAM_VIDEO) {
             video_shard(get_be32(pkt + 6), shards, shard, chunk, chunk_len);
+        } else if (stream == STREAM_AUDIO) {
+            audio_shard(get_be32(pkt + 6), shards, shard, chunk, chunk_len);
         }
     }
 }
@@ -487,8 +514,15 @@ static void run_session(int fd, uint32_t server_ip_be)
         if (const char *v = json_find(neg, nlen, "use_full_range"))
             full_range = strncmp(v, "true", 4) == 0;
         video_reset();
-        video_reassembly_reset();
+        reassembly_reset();
         video_set_stream(vw, vh, full_range);
+        uint32_t game_audio_rate = 0;
+        if (const char *v = json_find(neg, nlen, "game_audio_sample_rate"))
+            game_audio_rate = (uint32_t)atoi(v);
+        // Session settings: "microphone":{"enabled":...}
+        bool microphone = false;
+        if (const char *v = json_find(session, slen, "microphone"))
+            microphone = strncmp(v, "{\"enabled\":true", 15) == 0;
         LOG("alvr: packet_size=%d stream_port=%d protocol=%s view=%ux%u fps=%.1f", g_packet_size, stream_port,
             udp ? "UDP" : "TCP (unsupported)", vw, vh, fps);
         pthread_mutex_lock(&g_lock);
@@ -539,6 +573,7 @@ static void run_session(int fd, uint32_t server_ip_be)
             goto end;
         LOG("alvr: StreamReady sent, streaming");
         set_state(ALVR_STREAMING);
+        audio_start_stream(game_audio_rate, microphone);
         send_views_config();
         send_custom_interaction_profile();
         send_playspace_sync();
@@ -611,6 +646,7 @@ end:
     close_fd(&g_stream);
     pthread_mutex_unlock(&g_stream_send_lock);
     video_reset();
+    audio_stop_stream();
     LOG("alvr: disconnected");
     if (g_status.state != ALVR_RESTARTING)
         set_state(ALVR_DISCOVERY);
@@ -780,6 +816,12 @@ static void write_motion(BinWriter &w, uint64_t id, const AlvrDeviceMotion *m)
         w.f32(m->linear_velocity[i]);
     for (int i = 0; i < 3; i++)
         w.f32(m->angular_velocity[i]);
+}
+
+void alvr_send_microphone(const uint8_t *pcm, size_t len)
+{
+    if (g_status.state == ALVR_STREAMING)
+        stream_send(STREAM_AUDIO, pcm, len); // header () + s16le mono PCM
 }
 
 void alvr_send_tracking(uint64_t timestamp_ns, const AlvrDeviceMotion *head, const AlvrDeviceMotion *left,

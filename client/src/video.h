@@ -36,6 +36,7 @@ bool video_latest(VideoFrame *out);
 
 struct VideoStats {
     unsigned received, decoded, shown_candidates, dropped, errors;
+    unsigned queue_max; // most frames waiting for the decoder since the previous call
     uint64_t decode_us_avg, convert_us_avg;
 };
 void video_get_stats(VideoStats *out);

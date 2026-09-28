@@ -48,9 +48,15 @@ struct TrackedDevice {
     bool has_position, has_orientation; // at least one valid sample so far
     float position[3];
     float orientation[4]; // x, y, z, w
+    float velocity[3];         // m/s, tracker space (0 while not tracked)
+    float angular_velocity[3]; // rad/s, tracker space
     uint64_t timestamp;
     uint64_t last_seen_us; // last time the camera saw it (position FULL or PARTIAL)
 };
+
+// How far ahead of "now" the controller poses are predicted (us). Set by the render loop
+// from the measured motion-to-photon latency of the video stream; 0 in the lobby.
+extern volatile uint32_t g_tracker_controller_prediction_us;
 
 // Time without camera view after which a device is reported as "searching".
 #define TRACKER_CONTROLLER_SEARCHING_US 10000000ull

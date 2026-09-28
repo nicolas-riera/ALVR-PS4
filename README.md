@@ -10,8 +10,9 @@ lens distortion, 120 Hz reprojection), and closing it from the PS4 menu puts the
 back in normal mode.
 
 > Status: work in progress. Headset tracking, the PS Move controllers (emulated as HTC
-> Vive wands) and the lobby work. Video decoding works but is still being tuned (60 Hz for
-> now). Audio and the microphone are not done yet.
+> Vive wands), the lobby, and 60 Hz video (hardware H.264 decoding, shown by the system
+> at 120 Hz through reprojection) work. Game audio and the microphone are new and still
+> being tested.
 
 ## Requirements
 
@@ -48,6 +49,21 @@ python tools\alvr_setup.py "C:\path\to\alvr_streamer_windows\session.json"
 The dashboard rewrites its settings while it runs, so the script waits until you close
 the dashboard, which also closes SteamVR. It saves a backup of `session.json`, then applies
 every setting in the table below. Run it again after an ALVR update or a settings reset.
+Add `--mic` to also enable the microphone (see "Microphone" below).
+
+### Microphone
+
+ALVR delivers the PSVR microphone to Windows through a virtual audio cable. Install
+[Virtual Audio Cable](https://vac.muzychenko.net/en/) (its first cable is "Line 1"; ALVR's
+**VAC** preset), or [VB-Audio Virtual Cable](https://vb-audio.com/Cable/) (then choose the
+**VB Cable** preset in the dashboard). Then run the setup script with `--mic`, or set
+Audio → Microphone to on with that preset. In Windows and in games, choose the cable's
+**output** ("Line 1" / "CABLE Output") as the microphone. Do not make the cable the
+default Windows output: ALVR refuses to connect if game audio and the microphone use the
+same device.
+
+The Windows output device used for game audio must run at **48 kHz** (Sound settings →
+device properties → Advanced), the only rate the PS4 plays.
 
 ### By hand, in the dashboard (Settings tab)
 
@@ -56,6 +72,10 @@ every setting in the table below. Run it again after an ALVR update or a setting
 | Video → Preferred codec | **H264** | the PS4 hardware decoder is used for H.264 only |
 | Video → Foveated encoding | **off** | the client cannot undo it; left on, ALVR restarts SteamVR at every connection |
 | Video → Preferred FPS | **60** | the client offers 60 Hz (the PSVR reprojects it to 120 Hz) |
+| Video → Encoder → Quality preset | **Quality** (NVENC: **P4**) | the fastest preset blurs text; the PC's GPU pays for it, not the PS4 |
+| Video → Bitrate | **Constant, 50 Mbps** | 30 Mbps is too low for readable text |
+| Audio → Game audio | **on** | played in the PSVR headphones |
+| Audio → Microphone | **on**, devices **VAC**, only with a virtual audio cable (see below) | the PSVR microphone becomes a Windows microphone |
 | Connection → Stream protocol | **UDP** | TCP streaming is not implemented |
 | Headset → Controllers → Emulation mode | **Vive Wand** | PS Move buttons map onto a Vive wand |
 | Headset → Controllers → Hand skeleton | **off** | the PS Move has no finger tracking |
@@ -157,6 +177,8 @@ as "searching" after 10 s. When the headset is lost, SteamVR shows it as "search
 | Menu (□ / △) also opens the SteamVR dashboard | Driver patch not applied (run `tools/alvr_driver_patch.py`) |
 | Wand drawn ahead of the Move | Controller position offset not set to 0, 0, 0 |
 | The lobby stays although "Connected" | The codec must be H264. Look at the PS4 logs (below) for `video:` lines |
+| No sound in the headset | Game audio must be on, and the Windows output device must be at 48 kHz (the PS4 logs say "game audio at … Hz is not supported" otherwise) |
+| "Game audio and microphone cannot point to the same device" | The virtual cable is the default Windows output: pick your real speakers/headset as default |
 
 ## For developers
 
@@ -177,6 +199,7 @@ OpenSSL 1.1 in `~/ps4/libssl11` (PkgTool needs it; Debian 13 no longer ships it)
 | `client/src/main.cpp` | startup, main loop (60 Hz), lobby/video display, tracking uplink |
 | `client/src/alvr_client.*` | ALVR 20.14.1 protocol: discovery, handshake, streams, video reassembly |
 | `client/src/video.*` | hardware H.264 decoding (libSceVideodec2), NV12 → RGB |
+| `client/src/audio.*` | game audio playback (libSceAudioOut) and microphone capture (libSceAudioIn) |
 | `client/src/hmd.*`, `reproj.*`, `screen.*` | PSVR (libSceHmd) and the system reprojection |
 | `client/src/tracker.*`, `camera.*`, `move.*`, `wand.*` | camera tracking (libSceVrTracker), PS Move, Vive wand emulation |
 | `client/src/lobby.*` | software-rendered lobby |

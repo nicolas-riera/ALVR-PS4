@@ -118,6 +118,10 @@ static const int QUEUE_SLOTS = 8;
 static const size_t CONFIG_MAX = 1024;       // SPS/PPS, prepended to IDR frames in place
 static const size_t SLOT_SIZE = 3 << 20;     // largest access unit accepted (+ CONFIG_MAX)
 static const int EYE_SETS = 4;               // published, displayed, previously displayed, writing
+// Decoder pipeline depth: at 1 every Decode call waits for its own picture (13-18 ms at
+// 1920x1056, too close to the 16.7 ms frame time: frames queued up and added ~100 ms).
+// At 2 the library decodes one access unit while returning the previous picture.
+static const uint32_t DECODE_DEPTH = 2;
 
 struct Slot {
     uint8_t *mem; // CONFIG_MAX bytes of headroom, then the frame
@@ -358,6 +362,13 @@ static bool alloc_eye_buffers(uint32_t w, uint32_t h)
 // ---------------------------------------------------------------------------------------
 // Decoder
 
+// Timestamps of the access units inside the decoder, oldest first: with a pipeline depth
+// of N, a picture comes out N-1 Decode calls after its access unit went in.
+static uint64_t g_ts_fifo[16];
+static int g_ts_head, g_ts_count;
+
+static void ts_fifo_clear() { g_ts_head = g_ts_count = 0; }
+
 static bool create_compute_queue()
 {
     if (g_compute_queue)
@@ -406,10 +417,10 @@ static bool create_decoder(uint32_t width, uint32_t height)
     cfg.max_frame_width = (int32_t)((width + 15) & ~15u);
     cfg.max_frame_height = (int32_t)((height + 15) & ~15u);
     cfg.max_dpb_frame_count = 16;
-    cfg.decode_pipeline_depth = 1;
+    cfg.decode_pipeline_depth = DECODE_DEPTH;
     cfg.compute_queue = g_compute_queue;
     cfg.cpu_affinity_mask = 0x3f;
-    cfg.cpu_thread_priority = -1;
+    cfg.cpu_thread_priority = 256; // highest allowed: decoding is on the latency path
     cfg.optimize_progressive = 1;
     cfg.check_memory_type = 0;
     Vdec2MemoryInfo mem{};
@@ -453,6 +464,7 @@ static bool create_decoder(uint32_t width, uint32_t height)
     mem.gpu_memory_size = gpu_size;
     mem.cpu_gpu_memory_size = cpu_gpu_size;
     mem.max_frame_buffer_size = g_frame_buffer_size;
+    ts_fifo_clear();
     rc = p_create(&cfg, &mem, &g_decoder);
     LOG("video: sceVideodec2CreateDecoder -> 0x%08x", (unsigned)rc);
     if (rc != 0) {
@@ -502,6 +514,8 @@ static void decode_one(Slot &s, const uint8_t *config, size_t config_len)
     uint64_t t0 = now_us();
     int rc = p_decode(g_decoder, &in, &fb, &out);
     uint64_t t1 = now_us();
+    if (rc == 0 && g_ts_count < 16)
+        g_ts_fifo[(g_ts_head + g_ts_count++) % 16] = s.timestamp_ns;
     static unsigned logged;
     if (logged < 3 || (rc != 0 && logged < 40)) {
         logged++;
@@ -516,6 +530,7 @@ static void decode_one(Slot &s, const uint8_t *config, size_t config_len)
         request_idr_locked();
         pthread_mutex_unlock(&g_lock);
         p_reset(g_decoder);
+        ts_fifo_clear();
         return;
     }
     pthread_mutex_lock(&g_lock);
@@ -524,11 +539,17 @@ static void decode_one(Slot &s, const uint8_t *config, size_t config_len)
     pthread_mutex_unlock(&g_lock);
     if (!out.is_valid)
         return;
+    uint64_t ts = s.timestamp_ns;
+    if (g_ts_count > 0) {
+        ts = g_ts_fifo[g_ts_head];
+        g_ts_head = (g_ts_head + 1) % 16;
+        g_ts_count--;
+    }
     // Hand the picture to the conversion thread; an older one it has not started is
     // replaced (its frame buffer becomes free again). Decoding and conversion overlap.
     pthread_mutex_lock(&g_dec_lock);
     g_pending = Decoded{fb_index, out.frame_width, out.frame_height,
-                        out.frame_pitch_in_bytes ? out.frame_pitch_in_bytes : out.frame_pitch, s.timestamp_ns};
+                        out.frame_pitch_in_bytes ? out.frame_pitch_in_bytes : out.frame_pitch, ts};
     g_has_pending = true;
     pthread_cond_signal(&g_dec_cond);
     pthread_mutex_unlock(&g_dec_lock);
@@ -725,6 +746,8 @@ void video_push_frame(uint64_t timestamp_ns, bool is_idr, const uint8_t *data, s
     s.received_us = now_us();
     s.idr = is_idr;
     g_count++;
+    if ((unsigned)g_count > g_stats.queue_max)
+        g_stats.queue_max = g_count;
     pthread_cond_signal(&g_cond);
     pthread_mutex_unlock(&g_lock);
 }
@@ -792,5 +815,6 @@ void video_get_stats(VideoStats *out)
 {
     pthread_mutex_lock(&g_lock);
     *out = g_stats;
+    g_stats.queue_max = 0;
     pthread_mutex_unlock(&g_lock);
 }
