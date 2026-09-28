@@ -4,6 +4,7 @@
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <poll.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
@@ -28,8 +29,9 @@ static const uint64_t HANDSHAKE_TIMEOUT_US = 2000000;
 static const int SHARD_PREFIX = 18;
 
 // OpenOrbis' MSG_* flags use values that mean something else to the PS4's FreeBSD
-// kernel (its MSG_DONTWAIT is FreeBSD's MSG_WAITALL): no send/recv flags are used,
-// sockets are made non-blocking with fcntl instead. SO_NOSIGPIPE is FreeBSD's value.
+// kernel (its MSG_DONTWAIT is FreeBSD's MSG_WAITALL), and O_NONBLOCK set with fcntl
+// had no effect (accept() blocked the announce loop after the first announce). Every
+// accept/recv is therefore preceded by poll() with a timeout. SO_NOSIGPIPE is FreeBSD's.
 #ifndef SO_NOSIGPIPE
 #define SO_NOSIGPIPE 0x0800
 #endif
@@ -74,6 +76,15 @@ struct HandPaths {
 static HandPaths g_paths[2];
 
 static uint64_t now_us() { return sceKernelGetProcessTime(); }
+
+// True if fd has data (or a pending connection) within timeout_ms.
+static bool readable(int fd, int timeout_ms)
+{
+    pollfd p{fd, POLLIN, 0};
+    return poll(&p, 1, timeout_ms) > 0 && (p.revents & (POLLIN | POLLHUP | POLLERR));
+}
+
+static int g_listener = -1;
 
 static void set_state(AlvrState s)
 {
@@ -131,15 +142,15 @@ static long control_recv(uint8_t **buf, size_t *cap, uint64_t timeout_us)
     bool have_len = false;
     while (true) {
         uint8_t *dst = have_len ? *buf + got : prefix + got;
+        uint64_t t = now_us();
+        if (t >= deadline)
+            return got == 0 && !have_len ? 0 : -1;
+        int wait_ms = (int)((deadline - t + 999) / 1000);
+        if (!readable(g_control, wait_ms))
+            continue; // re-check the deadline
         ssize_t r = recv(g_control, dst, need - got, 0);
-        if (r == 0)
-            return -1;
-        if (r < 0) {
-            if (now_us() > deadline)
-                return got == 0 && !have_len ? 0 : -1;
-            sceKernelUsleep(1000);
-            continue;
-        }
+        if (r <= 0)
+            return -1; // readable but nothing: closed or reset
         got += (size_t)r;
         if (got < need)
             continue;
@@ -199,8 +210,8 @@ static void stream_send(uint16_t stream, const uint8_t *data, size_t len)
 static void stream_poll()
 {
     uint8_t pkt[4096];
-    for (int n = 0; n < 256; n++) {
-        ssize_t r = recv(g_stream, pkt, sizeof(pkt), 0); // socket is non-blocking
+    for (int n = 0; n < 256 && readable(g_stream, 0); n++) {
+        ssize_t r = recv(g_stream, pkt, sizeof(pkt), 0);
         if (r < SHARD_PREFIX)
             return;
         uint16_t stream = (uint16_t)(pkt[4] << 8 | pkt[5]);
@@ -477,7 +488,7 @@ static void run_session(int fd, uint32_t server_ip_be)
                 last_tx = t;
             }
             flush_buttons();
-            len = control_recv(&buf, &cap, 2000);
+            len = control_recv(&buf, &cap, 4000); // 4 ms: also paces this loop
             if (len < 0) {
                 LOG("alvr: control socket closed");
                 break;
@@ -495,6 +506,10 @@ static void run_session(int fd, uint32_t server_ip_be)
             }
             if (now_us() - last_rx > KEEPALIVE_TIMEOUT_US) {
                 LOG("alvr: keepalive timeout");
+                break;
+            }
+            if (g_listener >= 0 && readable(g_listener, 0)) {
+                LOG("alvr: the streamer opened a new connection, dropping this session");
                 break;
             }
             stream_poll();
@@ -539,7 +554,7 @@ static void *net_thread(void *)
     bcast.sin_port = htons(CONTROL_PORT);
     bcast.sin_addr.s_addr = htonl(INADDR_BROADCAST);
 
-    int listener = socket(AF_INET, SOCK_STREAM, 0);
+    int listener = g_listener = socket(AF_INET, SOCK_STREAM, 0);
     setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
     if (bind(listener, (sockaddr *)&a, sizeof(a)) != 0 || listen(listener, 1) != 0)
         LOG("alvr: control listener bind/listen failed");
@@ -566,6 +581,8 @@ static void *net_thread(void *)
                 LOG("alvr: announce #%u -> 255.255.255.255: %d, subnet: %d", announces, (int)r1, (int)r2);
             last_announce = t;
         }
+        if (!readable(listener, 100))
+            continue;
         sockaddr_in peer{};
         socklen_t plen = sizeof(peer);
         int fd = accept(listener, (sockaddr *)&peer, &plen);
@@ -577,7 +594,6 @@ static void *net_thread(void *)
             }
             continue;
         }
-        sceKernelUsleep(50000);
     }
     return nullptr;
 }

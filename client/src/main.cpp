@@ -30,7 +30,7 @@
 #include "screen.h"
 #include "tracker.h"
 
-#define ALVR_PS4_VERSION "0.7.2"
+#define ALVR_PS4_VERSION "0.7.3"
 
 static char g_ip[16] = "?";
 
