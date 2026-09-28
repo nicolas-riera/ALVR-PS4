@@ -332,24 +332,31 @@ static void *convert_thread(void *)
     return nullptr;
 }
 
+// Eye buffers are allocated once for the largest stream (160% of the panel) and only
+// re-described when a new session uses another size.
+static const uint32_t EYE_MAX_W = 1536, EYE_MAX_H = 1728;
+
 static bool alloc_eye_buffers(uint32_t w, uint32_t h)
 {
     if (g_eye_mem[0][0] && w == g_eye_w && h == g_eye_h)
         return true;
-    if (g_eye_mem[0][0]) {
-        LOG("video: eye size changed to %ux%u, not supported yet", w, h);
+    if (w > EYE_MAX_W || h > EYE_MAX_H) {
+        LOG("video: eye size %ux%u above the %ux%u maximum", w, h, EYE_MAX_W, EYE_MAX_H);
         return false;
     }
+    const size_t each = ((size_t)EYE_MAX_W * EYE_MAX_H * 4 + 0xffff) & ~(size_t)0xffff;
+    if (!g_eye_mem[0][0]) {
+        uint8_t *mem = (uint8_t *)alloc_direct(each * EYE_SETS * 2, 0x10000, MEM_ONION, "eye buffers");
+        if (!mem)
+            return false;
+        for (int s = 0; s < EYE_SETS; s++)
+            for (int e = 0; e < 2; e++)
+                g_eye_mem[s][e] = (uint32_t *)(mem + each * (s * 2 + e));
+    }
     uint32_t pitch = (w + 63) & ~63u;
-    size_t each = (size_t)pitch * h * 4;
-    each = (each + 0xffff) & ~(size_t)0xffff;
-    uint8_t *mem = (uint8_t *)alloc_direct(each * EYE_SETS * 2, 0x10000, MEM_ONION, "eye buffers");
-    if (!mem)
-        return false;
-    memset(mem, 0, each * EYE_SETS * 2);
     for (int s = 0; s < EYE_SETS; s++)
         for (int e = 0; e < 2; e++) {
-            g_eye_mem[s][e] = (uint32_t *)(mem + each * (s * 2 + e));
+            memset(g_eye_mem[s][e], 0, each);
             gnm_texture_linear_bgra(&g_eye_tex[s][e], g_eye_mem[s][e], w, h, pitch);
         }
     g_eye_w = w;
@@ -817,4 +824,19 @@ void video_get_stats(VideoStats *out)
     *out = g_stats;
     g_stats.queue_max = 0;
     pthread_mutex_unlock(&g_lock);
+}
+
+bool video_wait_new(unsigned after_seq, uint32_t timeout_us)
+{
+    uint64_t end = now_us() + timeout_us;
+    for (;;) {
+        pthread_mutex_lock(&g_pub_lock);
+        bool fresh = g_published >= 0 && g_pub_seq != after_seq;
+        pthread_mutex_unlock(&g_pub_lock);
+        if (fresh)
+            return true;
+        if (now_us() >= end)
+            return false;
+        sceKernelUsleep(500);
+    }
 }

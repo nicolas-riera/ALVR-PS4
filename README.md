@@ -73,7 +73,9 @@ device properties → Advanced), the only rate the PS4 plays.
 | Video → Foveated encoding | **off** | the client cannot undo it; left on, ALVR restarts SteamVR at every connection |
 | Video → Preferred FPS | **60** | the client offers 60 Hz (the PSVR reprojects it to 120 Hz) |
 | Video → Encoder → Quality preset | **Quality** (NVENC: **P4**) | the fastest preset blurs text; the PC's GPU pays for it, not the PS4 |
-| Video → Bitrate | **Constant, 50 Mbps** | 30 Mbps is too low for readable text |
+| Video → Bitrate | **Constant, 60 Mbps** | 30 Mbps is too low for readable text |
+| Headset → Extra OpenVR props | `TrackingSystemNameString` = `htc`, `ModelNumberString` = `PlayStation VR`, `ManufacturerNameString` = `Sony Interactive Entertainment`, `RenderModelNameString` = `generic_hmd`, `RegisteredDeviceTypeString` = `sony/psvr`, `DriverVersionString` = `20.14.1` | the "Custom" headset mode declares no identity at all; VRChat left the head at the origin |
+| Headset → Controllers → Extra OpenVR props | also `CurrentUniverseIdUint64` = `2` | same tracking universe as the headset |
 | Audio → Game audio | **on** | played in the PSVR headphones |
 | Audio → Microphone | **on**, devices **VAC**, only with a virtual audio cable (see below) | the PSVR microphone becomes a Windows microphone |
 | Connection → Stream protocol | **UDP** | TCP streaming is not implemented |
@@ -208,5 +210,11 @@ OpenSSL 1.1 in `~/ps4/libssl11` (PkgTool needs it; Debian 13 no longer ships it)
 | `tools/alvr_driver_patch.py` | ALVR 20.14.1 driver fix: menu button no longer presses system |
 | `tools/re/` | reverse-engineering helpers (headless Ghidra on dumped system modules) |
 
-The PS4 client's settings are stored in `/data/alvr-ps4/config.txt` on the console
-(currently only its ALVR hostname).
+The PS4 client's settings are stored in `/data/alvr-ps4/config.txt` on the console. Edit
+it over GoldHEN's FTP server, then restart the app:
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `hostname` | random `NNNN.client` | the name the PS4 announces to ALVR |
+| `resolution_percent` | `130` | stream resolution per eye, in percent of the PSVR panel (960×1080), 50–160 |
+| `controller_prediction_ms` | `0` | extra controller prediction on top of SteamVR's, 0–60 |

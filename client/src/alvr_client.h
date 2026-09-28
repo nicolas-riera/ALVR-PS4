@@ -31,6 +31,7 @@ struct AlvrDeviceMotion {
 };
 
 struct AlvrViews {
+    uint32_t view_width, view_height; // per-eye resolution offered to the streamer
     float ipd_m;
     float fov[2][4]; // per eye: left, right, up, down angles in radians (OpenXR signs)
 };

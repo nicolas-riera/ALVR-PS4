@@ -32,7 +32,7 @@
 #include "audio.h"
 #include "video.h"
 
-#define ALVR_PS4_VERSION "0.9.0"
+#define ALVR_PS4_VERSION "0.9.1"
 
 static char g_ip[16] = "?";
 
@@ -274,6 +274,8 @@ static bool find_sent_pose(uint64_t timestamp_ns, ReprojPose *out)
     return true;
 }
 
+static unsigned g_video_shown_seq; // last video frame handed to the compositor
+
 // Streamed frame: shown through the compositor with the pose it was rendered for.
 // Returns false (lobby shown instead) until frames arrive, or after 1.5 s without one.
 static bool render_video()
@@ -303,13 +305,15 @@ static bool render_video()
     compute_fov_blocks(fov, fov_block);
     bool ok = reproj_submit_stereo(vf.eye[0], vf.eye[1], fov_block[0], fov_block[1], &pose) == 0;
     static uint64_t stat_start;
-    static unsigned last_seq, shown;
-    // Motion-to-photon of the controllers: from the tracking sample a frame was rendered
-    // with to its display (next compositor vsync, ~8 ms after submission, 60 Hz loop).
-    // SteamVR already extrapolates 2.1 frames (35 ms at 60 Hz) with the velocities; the
-    // rest is predicted by the tracker, so the sabers are drawn where the hands are.
+    static unsigned shown;
+    unsigned &last_seq = g_video_shown_seq;
+    // Motion-to-photon: from the tracking sample a frame was rendered with to its display
+    // (next compositor vsync, ~8 ms after submission). Logged only: predicting all of it
+    // on top of SteamVR's own extrapolation (2.1 frames, with the velocities) was too
+    // much. The optional extra prediction comes from config.txt.
     static uint64_t m2p_avg_us;
     uint64_t now = sceKernelGetProcessTime();
+    g_tracker_controller_prediction_us = (uint32_t)g_config.controller_prediction_ms * 1000;
     if (vf.seq != last_seq) {
         shown++;
         last_seq = vf.seq;
@@ -317,9 +321,6 @@ static bool render_video()
         if (sample_us && now + 8000 > sample_us && now + 8000 - sample_us < 500000) {
             uint64_t m2p = now + 8000 - sample_us;
             m2p_avg_us = m2p_avg_us ? (m2p_avg_us * 31 + m2p) / 32 : m2p;
-            const uint64_t steamvr_us = 35000, max_us = 60000;
-            uint64_t p = m2p_avg_us > steamvr_us ? m2p_avg_us - steamvr_us : 0;
-            g_tracker_controller_prediction_us = (uint32_t)(p > max_us ? max_us : p);
         }
     }
     if (!stat_start)
@@ -327,11 +328,9 @@ static bool render_video()
     if (now - stat_start >= 5000000) {
         VideoStats vs;
         video_get_stats(&vs);
-        LOG("video: shown %.1f fps | received %u decoded %u dropped %u errors %u | decode %.2f ms convert %.2f ms | "
-            "queue %u | motion-to-photon %.1f ms, controller prediction %.1f ms",
+        LOG("video: %.1f fps, rx %u dec %u drop %u err %u, decode %.1f ms, convert %.1f ms, queue %u, m2p %.0f ms",
             shown * 1e6 / (double)(now - stat_start), vs.received, vs.decoded, vs.dropped, vs.errors,
-            vs.decode_us_avg / 1000.0, vs.convert_us_avg / 1000.0, vs.queue_max, m2p_avg_us / 1000.0,
-            g_tracker_controller_prediction_us / 1000.0);
+            vs.decode_us_avg / 1000.0, vs.convert_us_avg / 1000.0, vs.queue_max, m2p_avg_us / 1000.0);
         stat_start = now;
         shown = 0;
     }
@@ -501,6 +500,8 @@ static void haptics_to_move(int hand, float duration_s, float frequency, float a
 static void start_alvr()
 {
     AlvrViews views;
+    views.view_width = (uint32_t)(960 * g_config.resolution_percent / 100);
+    views.view_height = (uint32_t)(1080 * g_config.resolution_percent / 100);
     views.ipd_m = 0.063f;
     const HmdFieldOfView &f = g_hmd.fov;
     // OpenXR angle convention: left and down negative.
@@ -672,7 +673,8 @@ int main()
             static bool lobby_started = false;
             if (g_tracker.results_ok && g_tracker.orientation_quality != 0)
                 lobby_started = true;
-            bool stereo = pc_connected && render_video();
+            bool stereo_video = pc_connected && render_video();
+            bool stereo = stereo_video;
             if (!stereo)
                 stereo = lobby_started && render_lobby(&screen);
             if (!stereo) {
@@ -689,13 +691,20 @@ int main()
             screen.cur ^= 1;
             // Pace to 60 Hz from the frame start (the compositor re-displays at 120 Hz).
             // Sleeping a fixed 16 ms after rendering made every frame render + 16 ms long.
+            // While streaming, the loop follows the video instead: each frame is handed to
+            // the compositor as soon as it is converted (a free-running 60 Hz timer beat
+            // against the PC's frame clock, showing some frames twice and skipping others).
             static uint64_t next_us = 0;
             uint64_t now_us = sceKernelGetProcessTime();
             if (next_us == 0 || now_us > next_us + 50000)
                 next_us = now_us;
             next_us += 16667;
-            if (next_us > now_us)
+            if (stereo_video) {
+                video_wait_new(g_video_shown_seq, 25000);
+                next_us = 0;
+            } else if (next_us > now_us) {
                 sceKernelUsleep((uint32_t)(next_us - now_us));
+            }
         } else if (screen.handle > 0) {
             draw(&screen, frame);
             screen_flip(&screen);

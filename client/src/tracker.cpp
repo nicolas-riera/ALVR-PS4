@@ -475,6 +475,65 @@ void tracker_unregister_device(TrackedDevice *d)
 
 volatile uint32_t g_tracker_controller_prediction_us = 0;
 
+static void qmul(const float a[4], const float b[4], float out[4]) // x, y, z, w
+{
+    out[0] = a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1];
+    out[1] = a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0];
+    out[2] = a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3];
+    out[3] = a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2];
+}
+
+static void qrotate(const float q[4], const float v[3], float out[3])
+{
+    // v + 2w (u x v) + 2 u x (u x v), u = q.xyz
+    float t[3] = {2 * (q[1] * v[2] - q[2] * v[1]), 2 * (q[2] * v[0] - q[0] * v[2]), 2 * (q[0] * v[1] - q[1] * v[0])};
+    out[0] = v[0] + q[3] * t[0] + (q[1] * t[2] - q[2] * t[1]);
+    out[1] = v[1] + q[3] * t[1] + (q[2] * t[0] - q[0] * t[2]);
+    out[2] = v[2] + q[3] * t[2] + (q[0] * t[1] - q[1] * t[0]);
+}
+
+// SteamVR extrapolates the controllers with their angular velocity in the world frame.
+// Whether the tracker reports it in the world or the device frame is decided from real
+// motion: the rotation between two successive orientations, q_now * conj(q_prev), is a
+// world-frame rotation; both interpretations are correlated with it over fast turns.
+static void update_angular_velocity(TrackedDevice *d, const ResultData *r)
+{
+    const float *w = r->angular_velocity;
+    float world[3] = {0, 0, 0};
+    if (r->orientation_quality != 0) {
+        if (d->angular_frame == 1)
+            memcpy(world, w, sizeof(world));
+        else if (d->angular_frame == 2)
+            qrotate(d->orientation, w, world);
+        if (d->angular_frame == 0 && d->prev_q_ts && r->timestamp > d->prev_q_ts) {
+            float dt = (r->timestamp - d->prev_q_ts) / 1e6f;
+            if (dt > 0.004f && dt < 0.04f) {
+                float inv[4] = {-d->prev_q[0], -d->prev_q[1], -d->prev_q[2], d->prev_q[3]}, dq[4];
+                qmul(d->orientation, inv, dq);
+                float sgn = dq[3] < 0 ? -2.0f / dt : 2.0f / dt;
+                float fd[3] = {dq[0] * sgn, dq[1] * sgn, dq[2] * sgn};
+                float e = fd[0] * fd[0] + fd[1] * fd[1] + fd[2] * fd[2];
+                if (e > 2.0f * 2.0f) { // turning faster than 2 rad/s
+                    float local[3];
+                    qrotate(d->orientation, w, local);
+                    d->corr_world += fd[0] * w[0] + fd[1] * w[1] + fd[2] * w[2];
+                    d->corr_local += fd[0] * local[0] + fd[1] * local[1] + fd[2] * local[2];
+                    d->corr_energy += e;
+                }
+                if (d->corr_energy > 500.0f) {
+                    float cw = d->corr_world / d->corr_energy, cl = d->corr_local / d->corr_energy;
+                    d->angular_frame = cw > 0.5f && cw >= cl ? 1 : cl > 0.5f ? 2 : 3;
+                    LOG("device 0x%x: angular velocity frame = %s (correlation world %.2f, local %.2f)", d->handle,
+                        d->angular_frame == 1 ? "world" : d->angular_frame == 2 ? "local" : "unusable, not sent", cw, cl);
+                }
+            }
+        }
+        memcpy(d->prev_q, d->orientation, sizeof(d->prev_q));
+        d->prev_q_ts = r->timestamp;
+    }
+    memcpy(d->angular_velocity, world, sizeof(world));
+}
+
 void tracker_update_device(TrackedDevice *d)
 {
     if (!d->registered)
@@ -522,10 +581,9 @@ void tracker_update_device(TrackedDevice *d)
         d->orientation[3] = p.qw;
         d->has_orientation = true;
     }
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; i < 3; i++)
         d->velocity[i] = r->position_quality != 0 ? r->velocity[i] : 0.0f;
-        d->angular_velocity[i] = r->orientation_quality != 0 ? r->angular_velocity[i] : 0.0f;
-    }
+    update_angular_velocity(d, r);
 }
 
 struct RecalibrateParam {

@@ -344,17 +344,18 @@ static const char *json_find(const char *json, size_t len, const char *key)
 
 static void write_capabilities(BinWriter &w)
 {
-    static const char *caps =
-        "{\"default_view_resolution\":[960,1080],\"supported_refresh_rates\":[60.0],"
-        "\"microphone_sample_rate\":48000,\"supports_foveated_encoding\":false,\"encoder_high_profile\":true,"
-        "\"encoder_10_bits\":false,\"encoder_av1\":false,\"multimodal_protocol\":false,\"prefer_10bit\":false,"
-        "\"prefer_full_range\":true,\"preferred_encoding_gamma\":1.0,\"prefer_hdr\":false}";
+    static char caps[640];
+    snprintf(caps, sizeof(caps),
+             "{\"default_view_resolution\":[%u,%u],\"supported_refresh_rates\":[60.0],"
+             "\"microphone_sample_rate\":48000,\"supports_foveated_encoding\":false,\"encoder_high_profile\":true,"
+             "\"encoder_10_bits\":false,\"encoder_av1\":false,\"multimodal_protocol\":false,\"prefer_10bit\":false,"
+             "\"prefer_full_range\":true,\"preferred_encoding_gamma\":1.0,\"prefer_hdr\":false}",
+             g_views.view_width, g_views.view_height);
     w.u8(1); // Some(VideoStreamingCapabilitiesLegacy)
-    w.u32(960);
-    w.u32(1080);
+    w.u32(g_views.view_width);
+    w.u32(g_views.view_height);
     size_t n = strlen(caps);
-    // 60 Hz only: the hardware decoder takes ~13.5 ms per 1920x1056 frame, too slow for
-    // 90 Hz. The system compositor reprojects 60 Hz to the PSVR's 120 Hz, as games do.
+    // 60 Hz only: the system compositor reprojects 60 Hz to the PSVR's 120 Hz, as games do.
     w.u64(1 + n);
     w.f32(60.0f);
     for (size_t i = 0; i < n; i++)

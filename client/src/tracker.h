@@ -49,7 +49,13 @@ struct TrackedDevice {
     float position[3];
     float orientation[4]; // x, y, z, w
     float velocity[3];         // m/s, tracker space (0 while not tracked)
-    float angular_velocity[3]; // rad/s, tracker space
+    float angular_velocity[3]; // rad/s, tracker (world) space; 0 until its frame is known
+    // Which frame libSceVrTracker reports angular velocity in is found at run time by
+    // comparing it with the rotation between successive orientations (world frame).
+    int angular_frame;         // 0 unknown, 1 world, 2 device-local, 3 unusable
+    float prev_q[4];
+    uint64_t prev_q_ts;
+    float corr_world, corr_local, corr_energy;
     uint64_t timestamp;
     uint64_t last_seen_us; // last time the camera saw it (position FULL or PARTIAL)
 };

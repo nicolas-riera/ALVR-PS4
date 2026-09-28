@@ -33,6 +33,8 @@ struct VideoFrame {
     unsigned seq;          // increments with every new frame
 };
 bool video_latest(VideoFrame *out);
+// Waits until a frame newer than after_seq is published (true) or timeout_us passes.
+bool video_wait_new(unsigned after_seq, uint32_t timeout_us);
 
 struct VideoStats {
     unsigned received, decoded, shown_candidates, dropped, errors;

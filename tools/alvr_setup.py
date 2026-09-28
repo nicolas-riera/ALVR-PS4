@@ -4,7 +4,8 @@ Applies every setting the PS4 client needs (see README.md, "ALVR streamer settin
   - video: H.264 (the PS4 decodes H.264 only), foveated encoding off (the client cannot
     undo it, and leaving it on makes the streamer restart SteamVR at every connection),
     60 fps preferred (the client only offers 60 Hz);
-  - encoder quality: the "Quality" preset (NVENC P4) at 50 Mbps instead of the fastest
+  - headset identity (PlayStation VR, same tracking system and universe as the controllers);
+  - encoder quality: the "Quality" preset (NVENC P4) at 60 Mbps instead of the fastest
     preset at 30 Mbps, which blurred text (the PC's GPU pays for it, not the PS4);
   - game audio on; with --mic, the microphone too (needs VB-Audio Virtual Cable on the PC);
   - stream over UDP;
@@ -30,7 +31,7 @@ import time
 ARGS = [a for a in sys.argv[1:] if not a.startswith("--")]
 SESSION = ARGS[0] if ARGS else r"C:\Users\habbo\Downloads\alvr_streamer_windows\session.json"
 MIC = "--mic" in sys.argv
-BITRATE_MBPS = 50
+BITRATE_MBPS = 60
 
 # client path suffix -> Vive destination suffix
 BUTTON_PAIRS = [
@@ -73,10 +74,28 @@ def set_button_mappings(c):
     bm["content"]["content"] = entries
 
 
-def set_input_profile(c):
-    props = c["extra_openvr_props"]["content"]
-    props[:] = [p for p in props if p["key"]["variant"] != "InputProfilePathString"]
-    props.append({"key": {"variant": "InputProfilePathString"}, "value": VIVE_INPUT_PROFILE})
+def set_props(container, values):
+    props = container["extra_openvr_props"]["content"]
+    props[:] = [p for p in props if p["key"]["variant"] not in values]
+    for key, value in values.items():
+        props.append({"key": {"variant": key}, "value": value})
+
+
+# The "Custom" headset emulation sets no identity at all (empty tracking system, model
+# and manufacturer), unlike the other modes. VRChat left the head at the origin with it.
+# The headset joins the controllers' tracking system and universe (2, set by ALVR).
+HEADSET_PROPS = {
+    "TrackingSystemNameString": "htc",
+    "ModelNumberString": "PlayStation VR",
+    "ManufacturerNameString": "Sony Interactive Entertainment",
+    "RenderModelNameString": "generic_hmd",
+    "RegisteredDeviceTypeString": "sony/psvr",
+    "DriverVersionString": "20.14.1",
+}
+CONTROLLER_PROPS = {
+    "InputProfilePathString": VIVE_INPUT_PROFILE,
+    "CurrentUniverseIdUint64": "2",
+}
 
 
 def main():
@@ -113,7 +132,8 @@ def main():
     c["hand_skeleton"]["enabled"] = False
     c["left_controller_position_offset"]["content"] = [0.0, 0.0, 0.0]
     c["left_controller_rotation_offset"]["content"] = [0.0, 0.0, 0.0]
-    set_input_profile(c)
+    set_props(c, CONTROLLER_PROPS)
+    set_props(ss["headset"], HEADSET_PROPS)
     set_button_mappings(c)
 
     backup = SESSION + ".bak-" + time.strftime("%Y%m%d-%H%M%S")
