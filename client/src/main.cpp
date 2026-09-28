@@ -28,7 +28,7 @@
 #include "screen.h"
 #include "tracker.h"
 
-#define ALVR_PS4_VERSION "0.6.1"
+#define ALVR_PS4_VERSION "0.6.2"
 
 static char g_ip[16] = "?";
 
@@ -112,6 +112,7 @@ static MoveController g_moves[MOVE_MAX];
 static WandEmulator g_wand_emu[MOVE_MAX];
 static WandInput g_wand[MOVE_MAX];
 static ClientConfig g_config;
+static bool g_floor_set = false; // cleared by a tracking reset: the tracker origin may move
 
 static void start_headset()
 {
@@ -178,6 +179,7 @@ static void poll_system_events()
         for (int i = 0; i < MOVE_MAX; i++)
             devs[i] = g_moves[i].track;
         tracker_recalibrate_all(devs, MOVE_MAX);
+        g_floor_set = false;
     }
     if (st.is_system_ui_overlaid != last.is_system_ui_overlaid ||
         st.is_in_background_execution != last.is_in_background_execution ||
@@ -197,12 +199,11 @@ static void poll_system_events()
 // system compositor together with the pose it was rendered for.
 static bool render_lobby(Screen *s)
 {
-    static float floor_y = -1.3f;
-    static bool floor_set = false;
+    static float floor_y = -1.4f;
     const TrackerPose &tp = g_tracker.device_pose;
-    if (!floor_set && g_tracker.status == 1 && g_tracker.position_quality == 9) {
-        floor_y = tp.py - 1.2f; // seated height guess until a proper floor calibration exists
-        floor_set = true;
+    if (!g_floor_set && g_tracker.status == 1 && g_tracker.position_quality == 9) {
+        floor_y = tp.py - 1.3f; // seated height guess until a proper floor calibration exists
+        g_floor_set = true;
         LOG("lobby: floor set at y=%.3f (head y=%.3f)", floor_y, tp.py);
     }
     LobbyView view;
@@ -243,6 +244,7 @@ static bool render_lobby(Screen *s)
         c.rgb = move_led_rgb(m.track.led_color);
         c.tracked = m.track.position_quality == 9 || m.track.position_quality == 6;
         const WandInput &w = g_wand[i];
+        c.hand_letter = move_index_hand(i) == HAND_LEFT ? 'L' : 'R';
         c.pad_touch = w.pad_touch;
         c.pad_click = w.pad_click;
         c.pad_x = w.pad_x;
@@ -260,7 +262,7 @@ static bool render_lobby(Screen *s)
     for (int i = 0; i < 5; i++)
         view.info[i] = info_lines[i];
     view.info[5] = nullptr;
-    view.info_pos = v3(0.0f, floor_y + 2.1f, -3.0f);
+    view.info_pos = v3(0.0f, floor_y + 1.6f, -3.0f);
     view.info_yaw = 0.0f;
     // Each eye gets its own 960x1080 image with pitch == width: with both eyes in one
     // 1920-wide buffer the compositor ignored the pitch and mixed the eyes row by row.
@@ -416,7 +418,7 @@ int main()
             // and grip, a longer buzz on a full trigger pull.
             if ((w.pad_click && !prev.pad_click) || (w.grip && !prev.grip))
                 move_vibrate(&g_moves[i], 150, 40);
-            if (w.trigger_click && !prev.trigger_click)
+            if (w.trigger >= 0.9f && prev.trigger < 0.9f)
                 move_vibrate(&g_moves[i], 220, 120);
             if (w.pad_click != prev.pad_click || w.grip != prev.grip || w.menu != prev.menu ||
                 w.system != prev.system || w.trigger_click != prev.trigger_click)

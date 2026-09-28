@@ -23,6 +23,7 @@ struct LobbyView {
         Quat rot;
         uint32_t rgb;  // sphere colour
         bool tracked;  // position currently seen by the camera
+        char hand_letter; // 'L' / 'R', drawn on the handle
         bool pad_touch, pad_click;
         float pad_x, pad_y;
     } controllers[2];

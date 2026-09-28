@@ -159,6 +159,38 @@ static void draw_scene(const EyeTarget &t, const LobbyView *view)
         line3d(t, p[e[0]], p[e[1]], PIXEL_ALPHA | 0x40c0ff);
 }
 
+// Stroke text on a plane: origin at the baseline start, `right`/`up` unit axes.
+static float text_width(const char *s, float height)
+{
+    const float scale = height / 0.662f; // cap height of the font in em
+    float w = 0;
+    for (; *s; s++) {
+        unsigned c = (unsigned char)*s;
+        w += (c >= 32 && c <= 126 ? stroke_font_glyphs[c - 32].advance : 0.5f) * scale;
+    }
+    return w;
+}
+
+static void draw_text3d(const EyeTarget &t, Vec3 origin, Vec3 right, Vec3 up, float height, const char *s,
+                        uint32_t col)
+{
+    const float scale = height / 0.662f;
+    float x = 0;
+    for (; *s; s++) {
+        unsigned c = (unsigned char)*s;
+        if (c < 32 || c > 126)
+            c = '?';
+        const StrokeGlyph &g = stroke_font_glyphs[c - 32];
+        for (int i = 0; i < g.count; i++) {
+            const float *seg = stroke_font_segs[g.first + i];
+            Vec3 a = origin + right * (x + seg[0] * scale) + up * (seg[1] * scale);
+            Vec3 b = origin + right * (x + seg[2] * scale) + up * (seg[3] * scale);
+            line3d(t, a, b, col);
+        }
+        x += g.advance * scale;
+    }
+}
+
 static void circle3d(const EyeTarget &t, Vec3 c, Vec3 u, Vec3 v, float r, uint32_t col)
 {
     const int n = 20;
@@ -190,6 +222,14 @@ static void draw_controller(const EyeTarget &t, const LobbyView::Controller &c)
     for (auto &e : edges)
         line3d(t, p[e[0]], p[e[1]], PIXEL_ALPHA | 0xb0b0b0);
 
+    // Hand letter on the lower middle of the handle (buttons side).
+    if (c.hand_letter) {
+        const char txt[2] = {c.hand_letter, 0};
+        const float lh = 0.018f;
+        Vec3 o = c.pos + z * (r + 0.115f) + y * (hw + 0.002f) + x * (-text_width(txt, lh) * 0.5f);
+        draw_text3d(t, o, x, z * -1.0f, lh, txt, PIXEL_ALPHA | 0xffffff);
+    }
+
     // Emulated trackpad: a ring on top of the handle, with the touch point.
     if (c.pad_touch) {
         const float pr = 0.022f;
@@ -198,38 +238,6 @@ static void draw_controller(const EyeTarget &t, const LobbyView::Controller &c)
         Vec3 dot = centre + x * (c.pad_x * pr) + z * (-c.pad_y * pr);
         float dr = c.pad_click ? 0.006f : 0.003f;
         circle3d(t, dot, x, z, dr, PIXEL_ALPHA | (c.pad_click ? 0xffd040 : 0xffffff));
-    }
-}
-
-// Stroke text on a plane: origin at the baseline start, `right`/`up` unit axes.
-static float text_width(const char *s, float height)
-{
-    const float scale = height / 0.662f; // cap height of the font in em
-    float w = 0;
-    for (; *s; s++) {
-        unsigned c = (unsigned char)*s;
-        w += (c >= 32 && c <= 126 ? stroke_font_glyphs[c - 32].advance : 0.5f) * scale;
-    }
-    return w;
-}
-
-static void draw_text3d(const EyeTarget &t, Vec3 origin, Vec3 right, Vec3 up, float height, const char *s,
-                        uint32_t col)
-{
-    const float scale = height / 0.662f;
-    float x = 0;
-    for (; *s; s++) {
-        unsigned c = (unsigned char)*s;
-        if (c < 32 || c > 126)
-            c = '?';
-        const StrokeGlyph &g = stroke_font_glyphs[c - 32];
-        for (int i = 0; i < g.count; i++) {
-            const float *seg = stroke_font_segs[g.first + i];
-            Vec3 a = origin + right * (x + seg[0] * scale) + up * (seg[1] * scale);
-            Vec3 b = origin + right * (x + seg[2] * scale) + up * (seg[3] * scale);
-            line3d(t, a, b, col);
-        }
-        x += g.advance * scale;
     }
 }
 

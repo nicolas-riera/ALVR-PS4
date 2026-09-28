@@ -20,10 +20,11 @@ int main(int argc, char **argv)
     v.floor_y = -1.47f;
     for (int i = 0; i < 2; i++) {
         v.controllers[i].visible = true;
-        v.controllers[i].pos = v3(i ? 0.2f : -0.2f, -0.55f, 0.55f);
+        v.controllers[i].pos = v3(i ? 0.12f : -0.12f, -0.4f, 0.6f);
         v.controllers[i].rot = Quat{0.3827f, 0, 0, 0.9239f}; // tilted 45 deg around X
         v.controllers[i].rgb = i ? 0xff00ff : 0x00ffff;
         v.controllers[i].tracked = true;
+        v.controllers[i].hand_letter = i ? 'R' : 'L';
         v.controllers[i].pad_touch = i == 0;
         v.controllers[i].pad_click = false;
         v.controllers[i].pad_x = 0.5f;
