@@ -24,19 +24,9 @@
 #include "screen.h"
 #include "tracker.h"
 
-#define ALVR_PS4_VERSION "0.4.0 (stage 3: 3D lobby)"
+#define ALVR_PS4_VERSION "0.4.2 (stage 3: 3D lobby)"
 
 static char g_ip[16] = "?";
-
-static void notify(const char *msg)
-{
-    OrbisNotificationRequest req;
-    memset(&req, 0, sizeof(req));
-    req.type = NotificationRequest;
-    req.targetId = -1;
-    strncpy(req.message, msg, sizeof(req.message) - 1);
-    sceKernelSendNotificationRequest(0, &req, sizeof(req), 0);
-}
 
 static void read_ip()
 {
@@ -198,12 +188,32 @@ static bool render_lobby(Screen *s)
     view.fov[0] = EyeFov{f.tan_out, f.tan_in, f.tan_top, f.tan_bottom};
     view.fov[1] = EyeFov{f.tan_in, f.tan_out, f.tan_top, f.tan_bottom};
     view.floor_y = floor_y;
-    lobby_render(s->buffers[s->cur], s->width, s->height, s->width, &view);
-
-    static GnmTexture tex[2];
-    gnm_texture_linear_bgra(&tex[s->cur], s->buffers[s->cur], s->width, s->height, s->width);
-    static const float uv_left[4] = {0.5f, 1.0f, 0.0f, 0.0f};
-    static const float uv_right[4] = {0.5f, 1.0f, 0.5f, 0.0f};
+    // Each eye gets its own 960x1080 image with pitch == width: with both eyes in one
+    // 1920-wide buffer the compositor ignored the pitch and mixed the eyes row by row.
+    static uint32_t *eye_buf[2][2]; // [double-buffer index][eye]
+    const int eye_w = 960, eye_h = 1080;
+    if (!eye_buf[0][0]) {
+        const size_t each = (size_t)eye_w * eye_h * 4, align = 0x10000;
+        const size_t total = (each * 4 + align - 1) / align * align;
+        off_t phys = 0;
+        void *mem = nullptr;
+        if (sceKernelAllocateDirectMemory(0, sceKernelGetDirectMemorySize(), total, align, 3, &phys) < 0 ||
+            sceKernelMapDirectMemory(&mem, total, 0x33, 0, phys, align) < 0) {
+            LOG("lobby: eye buffer allocation failed");
+            return false;
+        }
+        for (int i = 0; i < 4; i++)
+            eye_buf[i / 2][i % 2] = (uint32_t *)((char *)mem + each * i);
+    }
+    static int cur = 0;
+    static GnmTexture eye_tex[2][2];
+    for (int eye = 0; eye < 2; eye++) {
+        lobby_render_eye(eye_buf[cur][eye], eye_w, eye_h, eye_w, &view, eye);
+        gnm_texture_linear_bgra(&eye_tex[cur][eye], eye_buf[cur][eye], eye_w, eye_h, eye_w);
+    }
+    const float fov_left[4] = {view.fov[0].tan_left, view.fov[0].tan_right, view.fov[0].tan_up, view.fov[0].tan_down};
+    const float fov_right[4] = {view.fov[1].tan_left, view.fov[1].tan_right, view.fov[1].tan_up,
+                                view.fov[1].tan_down};
     ReprojPose pose;
     memset(&pose, 0, sizeof(pose));
     pose.timestamp = g_tracker.timestamp;
@@ -214,7 +224,9 @@ static bool render_lobby(Screen *s)
     pose.position[0] = tp.px;
     pose.position[1] = tp.py;
     pose.position[2] = tp.pz;
-    return reproj_submit_stereo(&tex[s->cur], &tex[s->cur], uv_left, uv_right, &pose) == 0;
+    bool ok = reproj_submit_stereo(&eye_tex[cur][0], &eye_tex[cur][1], fov_left, fov_right, &pose) == 0;
+    cur ^= 1;
+    return ok;
 }
 
 static void draw(Screen *s, unsigned frame)
@@ -265,12 +277,10 @@ int main()
 
     read_ip();
     LOG("PS4 IP address: %s", g_ip);
-    notify("ALVR PS4: starting");
 
     Screen screen;
     if (!screen_init(&screen, 1920, 1080)) {
         LOG("screen init failed, running headless");
-        notify("ALVR PS4: screen init failed");
     }
 
     probe_modules();

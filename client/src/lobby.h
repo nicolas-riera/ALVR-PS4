@@ -20,4 +20,7 @@ struct LobbyView {
     float floor_y;  // tracker-space height of the floor
 };
 
+// One eye (0 = left, 1 = right) into its own image.
+void lobby_render_eye(uint32_t *pixels, int width, int height, int pitch, const LobbyView *view, int eye);
+// Both eyes side by side (left half / right half), used by the host preview.
 void lobby_render(uint32_t *pixels, int width, int height, int pitch, const LobbyView *view);

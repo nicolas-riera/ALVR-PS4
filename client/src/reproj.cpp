@@ -36,13 +36,15 @@ struct Reproj2dParam {
 // sceHmdReprojectionStart parameter (16 qwords). libSceHmd checks [0], [1], [2], [7]
 // non-null, [7] 8-aligned, [8] in 2000..6999, [10] < 2, [0xb] & ~0xf0000000f == 0,
 // [0xc..0xf] zero. The stereo mesh builder (0x94c0) copies T#s from [0] and [1],
-// a sampler from [2], and per-eye 16-byte uv transforms from [3..4] and [5..6].
+// a sampler from [2], and per-eye 16-byte blocks from [3..4] and [5..6]: the field
+// of view the eye was rendered with (tangents left, right, up, down). Passing uv
+// transforms there showed the whole texture in each eye with a wild perspective.
 struct ReprojStereoParam {
     const GnmTexture *left;
     const GnmTexture *right;
     const void *sampler;
-    float uv_left[4];
-    float uv_right[4];
+    float fov_left[4];
+    float fov_right[4];
     void *label;
     uint32_t time_us;
     uint32_t pad;
@@ -222,8 +224,8 @@ int reproj_submit_2d(const GnmTexture *tex)
     return rc;
 }
 
-int reproj_submit_stereo(const GnmTexture *left, const GnmTexture *right, const float uv_left[4],
-                         const float uv_right[4], const ReprojPose *pose)
+int reproj_submit_stereo(const GnmTexture *left, const GnmTexture *right, const float fov_left[4],
+                         const float fov_right[4], const ReprojPose *pose)
 {
     if (!g_active || !p_start)
         return -1;
@@ -232,8 +234,8 @@ int reproj_submit_stereo(const GnmTexture *left, const GnmTexture *right, const 
     p.left = left;
     p.right = right;
     p.sampler = g_sampler;
-    memcpy(p.uv_left, uv_left, sizeof(p.uv_left));
-    memcpy(p.uv_right, uv_right, sizeof(p.uv_right));
+    memcpy(p.fov_left, fov_left, sizeof(p.fov_left));
+    memcpy(p.fov_right, fov_right, sizeof(p.fov_right));
     p.label = g_label;
     p.time_us = 3000;
     static int last_rc = 1;

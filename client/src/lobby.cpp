@@ -140,7 +140,7 @@ static void draw_scene(const EyeTarget &t, const LobbyView *view)
         line3d(t, p[e[0]], p[e[1]], PIXEL_ALPHA | 0x40c0ff);
 }
 
-void lobby_render(uint32_t *pixels, int width, int height, int pitch, const LobbyView *view)
+void lobby_render_eye(uint32_t *pixels, int width, int height, int pitch, const LobbyView *view, int eye)
 {
     const uint32_t bg = PIXEL_ALPHA | 0x06080c;
     for (int yy = 0; yy < height; yy++) {
@@ -148,18 +148,22 @@ void lobby_render(uint32_t *pixels, int width, int height, int pitch, const Lobb
         for (int xx = 0; xx < width; xx++)
             row[xx] = bg;
     }
+    EyeTarget t;
+    t.pixels = pixels;
+    t.x0 = 0;
+    t.width = width;
+    t.height = height;
+    t.pitch = pitch;
+    float side = eye == 0 ? -0.5f : 0.5f;
+    t.eye_pos = view->head_pos + rotate(view->head_rot, v3(side * view->ipd, 0, 0));
+    t.inv_rot = conj(view->head_rot);
+    t.fov = view->fov[eye];
+    draw_scene(t, view);
+}
+
+void lobby_render(uint32_t *pixels, int width, int height, int pitch, const LobbyView *view)
+{
     const int eye_w = width / 2;
-    for (int eye = 0; eye < 2; eye++) {
-        EyeTarget t;
-        t.pixels = pixels;
-        t.x0 = eye * eye_w;
-        t.width = eye_w;
-        t.height = height;
-        t.pitch = pitch;
-        float side = eye == 0 ? -0.5f : 0.5f;
-        t.eye_pos = view->head_pos + rotate(view->head_rot, v3(side * view->ipd, 0, 0));
-        t.inv_rot = conj(view->head_rot);
-        t.fov = view->fov[eye];
-        draw_scene(t, view);
-    }
+    lobby_render_eye(pixels, eye_w, height, pitch, view, 0);
+    lobby_render_eye(pixels + eye_w, eye_w, height, pitch, view, 1);
 }
