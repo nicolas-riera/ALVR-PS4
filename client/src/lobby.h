@@ -13,9 +13,8 @@ struct EyeFov {
 };
 
 struct LobbyView {
-    Vec3 head_pos;  // tracker space: origin at the PS Camera, metres
-    Quat head_rot;
-    float ipd;      // metres
+    Vec3 eye_pos[2]; // tracker space: origin at the PS Camera, metres
+    Quat eye_rot[2];
     EyeFov fov[2];  // left, right
     float floor_y;  // tracker-space height of the floor
 };

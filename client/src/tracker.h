@@ -23,6 +23,8 @@ struct TrackerState {
     uint32_t orientation_quality;
     uint32_t led_color;
     TrackerPose device_pose;
+    TrackerPose eye_pose[2]; // left, right (from the HMD result, includes the system IPD)
+    TrackerPose head_pose;
     uint64_t timestamp;
     unsigned results_ok;
 };

@@ -120,12 +120,18 @@ struct ResultData {
     float angular_velocity[3];
     float angular_acceleration[3];
     float camera_orientation[4];
-    TrackerPose device_pose; // first member of the HMD/pad/move info union
+    // HMD info (first member of the HMD/pad/move union at +0x80).
+    TrackerPose device_pose;
+    TrackerPose left_eye_pose;
+    TrackerPose right_eye_pose;
+    TrackerPose head_pose;
     // ...rest of the (large) structure is not read yet.
 };
 
 // Sizes checked by libSceVrTracker / used by Beat Saber.
 static_assert(sizeof(InitParam) == 0x80, "InitParam size");
+static_assert(sizeof(TrackerPose) == 0x40, "TrackerPose size");
+static_assert(__builtin_offsetof(ResultData, device_pose) == 0x80, "ResultData device_pose");
 static_assert(sizeof(UpdateMotionSensorDataParam) == 0x20, "UpdateMotionSensorDataParam size");
 static_assert(sizeof(GetResultParam) == 0x38, "GetResultParam size");
 static_assert(sizeof(GpuSubmitParam) == 0x288, "GpuSubmitParam size");
@@ -399,6 +405,9 @@ void tracker_update(TrackerState *st)
     st->orientation_quality = r->orientation_quality;
     st->led_color = r->led_color;
     st->device_pose = r->device_pose;
+    st->eye_pose[0] = r->left_eye_pose;
+    st->eye_pose[1] = r->right_eye_pose;
+    st->head_pose = r->head_pose;
     st->timestamp = r->timestamp;
     st->results_ok++;
 }

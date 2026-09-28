@@ -24,7 +24,7 @@
 #include "screen.h"
 #include "tracker.h"
 
-#define ALVR_PS4_VERSION "0.4.6 (stage 3: 3D lobby)"
+#define ALVR_PS4_VERSION "0.4.7 (stage 3: 3D lobby)"
 
 static char g_ip[16] = "?";
 
@@ -181,9 +181,29 @@ static bool render_lobby(Screen *s)
         LOG("lobby: floor set at y=%.3f (head y=%.3f)", floor_y, tp.py);
     }
     LobbyView view;
-    view.head_pos = v3(tp.px, tp.py, tp.pz);
-    view.head_rot = Quat{tp.qx, tp.qy, tp.qz, tp.qw};
-    view.ipd = 0.063f;
+    // Render each eye from the tracker's own eye pose: the device pose is not at eye
+    // level and does not rotate about the neck, which put the camera too low and made
+    // the perspective wrong when turning the head.
+    for (int eye = 0; eye < 2; eye++) {
+        const TrackerPose &ep = g_tracker.eye_pose[eye];
+        float n = ep.qx * ep.qx + ep.qy * ep.qy + ep.qz * ep.qz + ep.qw * ep.qw;
+        if (n > 0.5f) {
+            view.eye_pos[eye] = v3(ep.px, ep.py, ep.pz);
+            view.eye_rot[eye] = Quat{ep.qx, ep.qy, ep.qz, ep.qw};
+        } else { // eye poses not filled: device pose +- half a default IPD
+            Quat q{tp.qx, tp.qy, tp.qz, tp.qw};
+            view.eye_pos[eye] = v3(tp.px, tp.py, tp.pz) + rotate(q, v3(eye ? 0.0315f : -0.0315f, 0, 0));
+            view.eye_rot[eye] = q;
+        }
+    }
+    static bool logged = false;
+    if (!logged && g_tracker.status == 1) {
+        logged = true;
+        const TrackerPose &l = g_tracker.eye_pose[0], &r = g_tracker.eye_pose[1], &h = g_tracker.head_pose;
+        float dx = r.px - l.px, dy = r.py - l.py, dz = r.pz - l.pz;
+        LOG("poses: device p=(%.3f %.3f %.3f) left eye p=(%.3f %.3f %.3f) right eye p=(%.3f %.3f %.3f) head p=(%.3f %.3f %.3f) ipd=%.4f",
+            tp.px, tp.py, tp.pz, l.px, l.py, l.pz, r.px, r.py, r.pz, h.px, h.py, h.pz, sqrtf(dx * dx + dy * dy + dz * dz));
+    }
     const HmdFieldOfView &f = g_hmd.fov;
     view.fov[0] = EyeFov{f.tan_out, f.tan_in, f.tan_top, f.tan_bottom};
     view.fov[1] = EyeFov{f.tan_in, f.tan_out, f.tan_top, f.tan_bottom};

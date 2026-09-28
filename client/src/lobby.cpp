@@ -154,9 +154,8 @@ void lobby_render_eye(uint32_t *pixels, int width, int height, int pitch, const 
     t.width = width;
     t.height = height;
     t.pitch = pitch;
-    float side = eye == 0 ? -0.5f : 0.5f;
-    t.eye_pos = view->head_pos + rotate(view->head_rot, v3(side * view->ipd, 0, 0));
-    t.inv_rot = conj(view->head_rot);
+    t.eye_pos = view->eye_pos[eye];
+    t.inv_rot = conj(view->eye_rot[eye]);
     t.fov = view->fov[eye];
     draw_scene(t, view);
 }

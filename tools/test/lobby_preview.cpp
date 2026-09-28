@@ -9,10 +9,12 @@ int main(int argc, char **argv)
     const int W = 1920, H = 1080;
     uint32_t *px = (uint32_t *)malloc(W * H * 4);
     LobbyView v;
-    v.head_pos = v3(0.0f, -0.27f, 0.9f);
     float yaw = argc > 2 ? atof(argv[2]) : 0.0f; // radians around +Y
-    v.head_rot = Quat{0, sinf(yaw / 2), 0, cosf(yaw / 2)};
-    v.ipd = 0.063f;
+    Quat rot{0, sinf(yaw / 2), 0, cosf(yaw / 2)};
+    for (int eye = 0; eye < 2; eye++) {
+        v.eye_pos[eye] = v3(0.0f, -0.27f, 0.9f) + rotate(rot, v3(eye ? 0.0315f : -0.0315f, 0, 0));
+        v.eye_rot[eye] = rot;
+    }
     v.fov[0] = EyeFov{1.2074f, 1.1813f, 1.2629f, 1.2629f};
     v.fov[1] = EyeFov{1.1813f, 1.2074f, 1.2629f, 1.2629f};
     v.floor_y = -1.47f;
