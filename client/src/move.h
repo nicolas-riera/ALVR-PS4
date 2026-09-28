@@ -9,11 +9,24 @@
 
 #define MOVE_MAX 2
 
+// Button bits of MoveData.buttons, mapped on hardware from logged presses.
+enum MoveButton : uint16_t {
+    MOVE_BUTTON_SELECT = 0x0001, // used by the system for screenshots: never bind it
+    MOVE_BUTTON_T = 0x0002,      // trigger fully pressed (analog value in MoveController.trigger)
+    MOVE_BUTTON_MOVE = 0x0004,
+    MOVE_BUTTON_START = 0x0008,
+    MOVE_BUTTON_TRIANGLE = 0x0010,
+    MOVE_BUTTON_CIRCLE = 0x0020,
+    MOVE_BUTTON_CROSS = 0x0040,
+    MOVE_BUTTON_SQUARE = 0x0080,
+    MOVE_BUTTON_PS = 0x8000,     // intercepted by the system
+};
+
 struct MoveController {
     int handle;       // sceMoveOpen handle, < 0 if not opened
     bool connected;   // sceMoveGetDeviceInfo / ReadState succeed
     float sphere_radius;
-    uint16_t buttons; // raw button bits (mapping logged, see move.cpp)
+    uint16_t buttons; // MoveButton bits
     uint16_t trigger; // 0..255
     uint64_t next_register_us; // tracker registration retry time
     TrackedDevice track;
