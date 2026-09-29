@@ -17,19 +17,19 @@ back in normal mode.
 > Status: headset tracking, the PS Move controllers (emulated as HTC Vive wands, with
 > vibration), the lobby, 60 Hz video (hardware H.264 decoding with foveated encoding, shown
 > by the system at 120 Hz through reprojection), game audio and the microphone work.
-> Tested with VRChat and Beat Saber on a PS4 Pro.
+> Mainly tested with VRChat and Beat Saber on a PS4 Pro.
 
 ## Requirements
 
 | Side | What |
 | --- | --- |
-| PS4 | PS4 or PS4 Pro with [GoldHEN](https://github.com/GoldHEN/GoldHEN) (tested on a Pro, firmware 11.00) |
-| VR | PSVR (CUH-ZVR1 or ZVR2), PS Camera, two PS Move controllers |
+| PS4 | PS4 or PS4 Pro with [GoldHEN](https://github.com/GoldHEN/GoldHEN) (tested on a FAT and on a Pro, both firmware 11.00) |
+| VR | PSVR (CUH-ZVR1 or ZVR2), PS Camera, *two PS Move controllers* (optional) |
 | PC | Windows 10 or 11, SteamVR, **ALVR streamer 20.14.1 exactly** (the setup below downloads it) |
 | Network | PC and PS4 on the same local network, PS4 on Ethernet (or at least 5 GHz Wi-Fi) |
 
-The PS4 client implements the ALVR **20.14.1** protocol only. ALVR changes its protocol
-between versions, so any other streamer version will not connect.
+The PS4 client implements the ALVR **20.14.1** protocol only. ALVR may changes its protocol
+between versions, so any other streamer version may not connect.
 
 ## 1. Install the app on the PS4
 
@@ -44,7 +44,7 @@ Both files come from the project's **Releases** page: `ALVR-PS4-v0.9.x.pkg` for 
 
 ## 2. Set up the ALVR streamer on the PC
 
-### Automatic setup (recommended)
+### Automatic setup (recommended, Windows only)
 
 Install SteamVR from Steam first. Then double-click **`ALVR-PS4-Setup.bat`** (from the
 Releases page) and accept the administrator prompt. It:
