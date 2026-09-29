@@ -496,6 +496,72 @@
                   "variant": "CurrentUniverseIdUint64"
                 },
                 "value": "2"
+              },
+              {
+                "key": {
+                  "variant": "DeviceProvidesBatteryStatusBool"
+                },
+                "value": "true"
+              },
+              {
+                "key": {
+                  "variant": "DeviceIsWirelessBool"
+                },
+                "value": "true"
+              },
+              {
+                "key": {
+                  "variant": "NamedIconPathDeviceOffString"
+                },
+                "value": "{alvr_server}/icons/psmove_status_off.png"
+              },
+              {
+                "key": {
+                  "variant": "NamedIconPathDeviceSearchingString"
+                },
+                "value": "{alvr_server}/icons/psmove_status_searching.gif"
+              },
+              {
+                "key": {
+                  "variant": "NamedIconPathDeviceSearchingAlertString"
+                },
+                "value": "{alvr_server}/icons/psmove_status_searching_alert.gif"
+              },
+              {
+                "key": {
+                  "variant": "NamedIconPathDeviceReadyString"
+                },
+                "value": "{alvr_server}/icons/psmove_status_ready.png"
+              },
+              {
+                "key": {
+                  "variant": "NamedIconPathDeviceReadyAlertString"
+                },
+                "value": "{alvr_server}/icons/psmove_status_ready_alert.png"
+              },
+              {
+                "key": {
+                  "variant": "NamedIconPathDeviceAlertLowString"
+                },
+                "value": "{alvr_server}/icons/psmove_status_ready_low.png"
+              },
+              {
+                "key": {
+                  "variant": "NamedIconPathDeviceStandbyString"
+                },
+                "value": "{alvr_server}/icons/psmove_status_standby.png"
+              },
+              {
+                "key": {
+                  "variant": "NamedIconPathDeviceStandbyAlertString"
+                },
+                "value": "{alvr_server}/icons/psmove_status_standby_alert.png"
+              },
+              {
+                "key": {
+                  "variant": "NamedIconPathDeviceNotReadyString"
+                },
+                "value": "{alvr_server}/icons/psmove_status_error.png"
               }
             ]
           },
@@ -1605,6 +1671,66 @@
               "variant": "DriverVersionString"
             },
             "value": "20.14.1"
+          },
+          {
+            "key": {
+              "variant": "DeviceProvidesBatteryStatusBool"
+            },
+            "value": "false"
+          },
+          {
+            "key": {
+              "variant": "NamedIconPathDeviceOffString"
+            },
+            "value": "{alvr_server}/icons/psvr_status_off.png"
+          },
+          {
+            "key": {
+              "variant": "NamedIconPathDeviceSearchingString"
+            },
+            "value": "{alvr_server}/icons/psvr_status_searching.gif"
+          },
+          {
+            "key": {
+              "variant": "NamedIconPathDeviceSearchingAlertString"
+            },
+            "value": "{alvr_server}/icons/psvr_status_searching_alert.gif"
+          },
+          {
+            "key": {
+              "variant": "NamedIconPathDeviceReadyString"
+            },
+            "value": "{alvr_server}/icons/psvr_status_ready.png"
+          },
+          {
+            "key": {
+              "variant": "NamedIconPathDeviceReadyAlertString"
+            },
+            "value": "{alvr_server}/icons/psvr_status_ready_alert.png"
+          },
+          {
+            "key": {
+              "variant": "NamedIconPathDeviceAlertLowString"
+            },
+            "value": "{alvr_server}/icons/psvr_status_ready_low.png"
+          },
+          {
+            "key": {
+              "variant": "NamedIconPathDeviceStandbyString"
+            },
+            "value": "{alvr_server}/icons/psvr_status_standby.png"
+          },
+          {
+            "key": {
+              "variant": "NamedIconPathDeviceStandbyAlertString"
+            },
+            "value": "{alvr_server}/icons/psvr_status_standby_alert.png"
+          },
+          {
+            "key": {
+              "variant": "NamedIconPathDeviceNotReadyString"
+            },
+            "value": "{alvr_server}/icons/psvr_status_error.png"
           }
         ]
       },

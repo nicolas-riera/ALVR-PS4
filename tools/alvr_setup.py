@@ -22,7 +22,7 @@ The dashboard rewrites session.json while it runs: this waits until "ALVR Dashbo
 is closed, backs session.json up, then patches it. Run it again after an ALVR update or
 a settings reset; it is idempotent.
 
-Usage: python tools/alvr_setup.py [--mic] [path\\to\\alvr_streamer_windows\\session.json]
+Usage: python tools/alvr_setup.py [--mic] <path\\to\\ALVR-PS4_PC-Streamer\\session.json>
 """
 import json
 import shutil
@@ -31,7 +31,9 @@ import sys
 import time
 
 ARGS = [a for a in sys.argv[1:] if not a.startswith("--")]
-SESSION = ARGS[0] if ARGS else r"C:\Users\habbo\Downloads\alvr_streamer_windows\session.json"
+if not ARGS:
+    sys.exit(__doc__)
+SESSION = ARGS[0]
 MIC = "--mic" in sys.argv
 BITRATE_MBPS = 60
 FOVEATION = {
@@ -94,6 +96,25 @@ def set_props(container, values):
 # The "Custom" headset emulation sets no identity at all (empty tracking system, model
 # and manufacturer), unlike the other modes. VRChat left the head at the origin with it.
 # The headset joins the controllers' tracking system and universe (2, set by ALVR).
+def icons(base):
+    """SteamVR status icons (vrmonitor): the PSVR and PS Move icons that the PC setup installs
+    in the ALVR driver's resources/icons (made by tools/icons/make_icons.py; copy
+    pc-setup/icons there when setting up by hand). ALVR's own Vive wand paths
+    ({htc}/icons/controller_*) do not exist in SteamVR's htc driver: grey icons."""
+    return {
+        "NamedIconPathDeviceOffString": base + "_off.png",
+        "NamedIconPathDeviceSearchingString": base + "_searching.gif",
+        "NamedIconPathDeviceSearchingAlertString": base + "_searching_alert.gif",
+        "NamedIconPathDeviceReadyString": base + "_ready.png",
+        "NamedIconPathDeviceReadyAlertString": base + "_ready_alert.png",
+        "NamedIconPathDeviceAlertLowString": base + "_ready_low.png",
+        "NamedIconPathDeviceStandbyString": base + "_standby.png",
+        "NamedIconPathDeviceStandbyAlertString": base + "_standby_alert.png",
+        "NamedIconPathDeviceNotReadyString": base + "_error.png",
+    }
+
+
+HB, CB = "{alvr_server}/icons/psvr_status", "{alvr_server}/icons/psmove_status"
 HEADSET_PROPS = {
     "TrackingSystemNameString": "htc",
     "ModelNumberString": "PlayStation VR",
@@ -101,10 +122,17 @@ HEADSET_PROPS = {
     "RenderModelNameString": "generic_hmd",
     "RegisteredDeviceTypeString": "sony/psvr",
     "DriverVersionString": "20.14.1",
+    # The PSVR has no battery (ALVR declares one for standalone headsets).
+    "DeviceProvidesBatteryStatusBool": "false",
+    **icons(HB),
 }
 CONTROLLER_PROPS = {
     "InputProfilePathString": VIVE_INPUT_PROFILE,
     "CurrentUniverseIdUint64": "2",
+    # PS Move battery, sent by the client in Battery packets.
+    "DeviceProvidesBatteryStatusBool": "true",
+    "DeviceIsWirelessBool": "true",
+    **icons(CB),
 }
 
 

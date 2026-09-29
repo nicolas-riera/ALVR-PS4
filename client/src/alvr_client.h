@@ -23,7 +23,7 @@ struct AlvrStatus {
 };
 
 struct AlvrDeviceMotion {
-    bool present;          // false: omitted from the packet (controller lost/off)
+    bool present;          // false: omitted from the packet (controller off: disconnected)
     float orientation[4];  // x, y, z, w (stage space)
     float position[3];     // metres, stage space (+Y up, -Z forward, floor origin)
     float linear_velocity[3];
@@ -54,5 +54,7 @@ void alvr_get_status(AlvrStatus *out);
 void alvr_send_tracking(uint64_t timestamp_ns, const AlvrDeviceMotion *head, const AlvrDeviceMotion *left,
                         const AlvrDeviceMotion *right);
 void alvr_update_input(int hand, const AlvrHandInput *in);
+// Controller battery for SteamVR (hand 0 left, 1 right; gauge 0..1). Sent when it changes.
+void alvr_set_battery(int hand, bool known, float gauge, bool plugged);
 // Microphone uplink: s16le mono at 48 kHz, ~10 ms per call (any thread).
 void alvr_send_microphone(const uint8_t *pcm, size_t len);

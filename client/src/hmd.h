@@ -46,9 +46,15 @@ struct HmdState {
 
 const char *hmd_status_name(uint32_t status);
 
-// Initializes libSceHmd and opens the headset for the given user.
-// Leaving the headset open is what makes the system treat us as a VR app.
-bool hmd_start(int module_handle, int user_id, HmdState *out);
+// Initializes libSceHmd (the device information can then be read).
+bool hmd_init(int module_handle, HmdState *out);
+// Opens the headset for the given user (headset READY). Leaving the headset open is
+// what makes the system treat us as a VR app.
+bool hmd_open(int user_id, HmdState *st);
+// False once the handle is invalid (the headset was power cycled or replugged).
+bool hmd_handle_valid(HmdState *st);
+// Closes the old handle and opens the headset again (the FoV is kept if it fails).
+bool hmd_reopen(int user_id, HmdState *st);
 // Re-reads the device information (status changes when the PSVR is powered).
 int hmd_refresh(HmdState *st);
 // Closes the headset and terminates libSceHmd, so the system gets the PSVR back.

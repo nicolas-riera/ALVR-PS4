@@ -445,6 +445,23 @@ void tracker_stop(int module, int camera_module)
     camera_stop(camera_module, &g_camera);
 }
 
+bool tracker_reregister_hmd(int hmd_handle)
+{
+    if (!g_state || !g_state->initialized || g_tracker_module < 0)
+        return false;
+    auto unreg = (int (*)(int32_t))resolve(g_tracker_module, "sceVrTrackerUnregisterDevice");
+    auto reg = (PFN_RegisterDevice)resolve(g_tracker_module, "sceVrTrackerRegisterDevice");
+    if (!unreg || !reg)
+        return false;
+    if (g_state->hmd_registered)
+        LOG("sceVrTrackerUnregisterDevice(HMD 0x%x) -> 0x%08x", g_hmd_handle, (unsigned)unreg(g_hmd_handle));
+    int rc = reg(DEVICE_HMD, hmd_handle);
+    LOG("sceVrTrackerRegisterDevice(HMD, 0x%x) -> 0x%08x", hmd_handle, (unsigned)rc);
+    g_hmd_handle = hmd_handle;
+    g_state->hmd_registered = rc >= 0;
+    return rc >= 0;
+}
+
 bool tracker_register_device(TrackedDevice *d, uint32_t type, int handle)
 {
     memset(d, 0, sizeof(*d));

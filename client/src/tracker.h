@@ -77,6 +77,8 @@ bool tracker_start(int tracker_module, int camera_module, int hmd_handle, Tracke
 void tracker_run_thread();
 // Stops the thread, unregisters the HMD, terminates the tracker and closes the camera.
 void tracker_stop(int tracker_module, int camera_module);
+// The headset was reopened with a new handle: unregisters the old one, registers it.
+bool tracker_reregister_hmd(int hmd_handle);
 // Registers a controller with the tracker (after tracker_start).
 bool tracker_register_device(TrackedDevice *d, uint32_t type, int handle);
 void tracker_unregister_device(TrackedDevice *d);

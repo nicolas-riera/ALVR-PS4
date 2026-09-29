@@ -1,5 +1,6 @@
 #include "lobby.h"
 
+#include "move.h"
 #include "stroke_font.h"
 
 #include <math.h>
@@ -136,16 +137,74 @@ static uint32_t grey(float intensity)
     return PIXEL_ALPHA | v << 16 | v << 8 | v;
 }
 
+// Convex polygon in view space: clipped against the near plane, projected, then filled
+// row by row (solid colour, overwriting what is behind).
+static void fill_poly_view(const EyeTarget &t, const Vec3 *in, int n, uint32_t rgb)
+{
+    Vec3 clipped[12];
+    int m = 0;
+    for (int i = 0; i < n && m < 10; i++) {
+        Vec3 a = in[i], b = in[(i + 1) % n];
+        bool ina = a.z < -NEAR_Z, inb = b.z < -NEAR_Z;
+        if (ina)
+            clipped[m++] = a;
+        if (ina != inb) {
+            float k = (-NEAR_Z - a.z) / (b.z - a.z);
+            clipped[m++] = a + (b - a) * k;
+        }
+    }
+    if (m < 3)
+        return;
+    float sx[12], sy[12], ymin = 1e9f, ymax = -1e9f;
+    for (int i = 0; i < m; i++) {
+        project(t, clipped[i], &sx[i], &sy[i]);
+        ymin = sy[i] < ymin ? sy[i] : ymin;
+        ymax = sy[i] > ymax ? sy[i] : ymax;
+    }
+    int y0 = (int)ceilf(ymin - 0.5f), y1 = (int)floorf(ymax - 0.5f);
+    if (y0 < 0)
+        y0 = 0;
+    if (y1 > t.height - 1)
+        y1 = t.height - 1;
+    const uint32_t c = PIXEL_ALPHA | rgb;
+    for (int y = y0; y <= y1; y++) {
+        float yc = y + 0.5f, xl = 1e9f, xr = -1e9f;
+        for (int i = 0; i < m; i++) {
+            int j = (i + 1) % m;
+            float ya = sy[i], yb = sy[j];
+            if ((ya <= yc && yb > yc) || (yb <= yc && ya > yc)) {
+                float x = sx[i] + (yc - ya) / (yb - ya) * (sx[j] - sx[i]);
+                xl = x < xl ? x : xl;
+                xr = x > xr ? x : xr;
+            }
+        }
+        int x0 = (int)ceilf(xl - 0.5f), x1 = (int)floorf(xr - 0.5f);
+        if (x0 < 0)
+            x0 = 0;
+        if (x1 > t.width - 1)
+            x1 = t.width - 1;
+        uint32_t *row = t.pixels + (size_t)y * t.pitch + t.x0;
+        for (int x = x0; x <= x1; x++)
+            row[x] = c;
+    }
+}
+
+static void fill_quad3d(const EyeTarget &t, Vec3 a, Vec3 b, Vec3 c, Vec3 d, uint32_t rgb)
+{
+    const Vec3 q[4] = {to_view(t, a), to_view(t, b), to_view(t, c), to_view(t, d)};
+    fill_poly_view(t, q, 4, rgb);
+}
+
 static void draw_scene(const EyeTarget &t, const LobbyView *view)
 {
-    // Floor grid, 1 m cells, fading with distance from the player.
+    // Floor grid, 1 m cells aligned on the play space centre, fading with distance.
     const int half = 12;
-    const float y = view->floor_y;
+    const float y = view->floor_y, cx = view->center_x, cz = view->center_z;
     for (int i = -half; i <= half; i++) {
         float fade = 1.0f - (i < 0 ? -i : i) / (float)(half + 1);
         uint32_t c = grey(0.25f + 0.65f * fade * fade);
-        line3d(t, v3((float)i, y, -half), v3((float)i, y, half), c);
-        line3d(t, v3(-half, y, (float)i), v3(half, y, (float)i), c);
+        line3d(t, v3(cx + i, y, cz - half), v3(cx + i, y, cz + half), c);
+        line3d(t, v3(cx - half, y, cz + i), v3(cx + half, y, cz + i), c);
     }
 
     // PS Camera placeholder: a small wireframe box at the tracker origin.
@@ -160,7 +219,7 @@ static void draw_scene(const EyeTarget &t, const LobbyView *view)
 }
 
 // Stroke text on a plane: origin at the baseline start, `right`/`up` unit axes.
-static float text_width(const char *s, float height)
+float lobby_text_width(const char *s, float height)
 {
     const float scale = height / 0.662f; // cap height of the font in em
     float w = 0;
@@ -203,8 +262,53 @@ static void circle3d(const EyeTarget &t, Vec3 c, Vec3 u, Vec3 v, float r, uint32
     }
 }
 
-// Placeholder PS Move until real 3D models are in: the sphere as three great circles
-// and a box handle along the local +Z axis.
+// Button symbols on the face of the Move: centre c, face axes u (right) and v (towards
+// the sphere), half size s.
+static void symbol_triangle(const EyeTarget &t, Vec3 c, Vec3 u, Vec3 v, float s, uint32_t col)
+{
+    Vec3 a = c + v * s, b = c - u * (s * 0.95f) - v * (s * 0.7f), d = c + u * (s * 0.95f) - v * (s * 0.7f);
+    line3d(t, a, b, col);
+    line3d(t, b, d, col);
+    line3d(t, d, a, col);
+}
+
+static void symbol_square(const EyeTarget &t, Vec3 c, Vec3 u, Vec3 v, float s, uint32_t col)
+{
+    s *= 0.8f;
+    Vec3 p[4] = {c - u * s - v * s, c + u * s - v * s, c + u * s + v * s, c - u * s + v * s};
+    for (int i = 0; i < 4; i++)
+        line3d(t, p[i], p[(i + 1) % 4], col);
+}
+
+static void symbol_cross(const EyeTarget &t, Vec3 c, Vec3 u, Vec3 v, float s, uint32_t col)
+{
+    s *= 0.8f;
+    line3d(t, c - u * s - v * s, c + u * s + v * s, col);
+    line3d(t, c - u * s + v * s, c + u * s - v * s, col);
+}
+
+static void ellipse3d(const EyeTarget &t, Vec3 c, Vec3 u, Vec3 v, float a, float b, uint32_t col)
+{
+    const int n = 24;
+    Vec3 prev = c + u * a;
+    for (int i = 1; i <= n; i++) {
+        float ang = 6.2831853f * i / n;
+        Vec3 p = c + u * (a * cosf(ang)) + v * (b * sinf(ang));
+        line3d(t, prev, p, col);
+        prev = p;
+    }
+}
+
+// A small rectangle (side buttons): centre c, half extents along a and b.
+static void rect3d(const EyeTarget &t, Vec3 c, Vec3 a, Vec3 b, uint32_t col)
+{
+    Vec3 p[4] = {c - a - b, c + a - b, c + a + b, c - a + b};
+    for (int i = 0; i < 4; i++)
+        line3d(t, p[i], p[(i + 1) % 4], col);
+}
+
+// PS Move as wireframe: the sphere as three great circles and a box handle along the
+// local +Z axis (buttons on the +Y face, START on the +X side, SELECT on the -X side).
 static void draw_controller(const EyeTarget &t, const LobbyView::Controller &c)
 {
     const float r = 0.0225f;
@@ -213,7 +317,7 @@ static void draw_controller(const EyeTarget &t, const LobbyView::Controller &c)
     circle3d(t, c.pos, x, y, r, col);
     circle3d(t, c.pos, y, z, r, col);
     circle3d(t, c.pos, z, x, r, col);
-    const float hw = 0.018f, z0 = r, z1 = r + 0.16f;
+    const float hw = 0.021f, z0 = r, z1 = r + 0.16f;
     Vec3 p[8];
     for (int k = 0; k < 8; k++)
         p[k] = c.pos + x * (k & 1 ? hw : -hw) + y * (k & 2 ? hw : -hw) + z * (k & 4 ? z1 : z0);
@@ -226,8 +330,72 @@ static void draw_controller(const EyeTarget &t, const LobbyView::Controller &c)
     if (c.hand_letter) {
         const char txt[2] = {c.hand_letter, 0};
         const float lh = 0.018f;
-        Vec3 o = c.pos + z * (r + 0.115f) + y * (hw + 0.002f) + x * (-text_width(txt, lh) * 0.5f);
+        Vec3 o = c.pos + z * (r + 0.115f) + y * (hw + 0.002f) + x * (-lobby_text_width(txt, lh) * 0.5f);
         draw_text3d(t, o, x, z * -1.0f, lh, txt, PIXEL_ALPHA | 0xffffff);
+    }
+
+    // Battery under the letter: four dots like SteamVR's (the Move reports 20 % steps),
+    // red when one or none is left, a bolt on the right while charging.
+    if (c.battery >= 0.0f) {
+        const Vec3 bc = c.pos + z * (r + 0.132f) + y * (hw + 0.002f);
+        const int dots = (int)ceilf(c.battery * 4.0f - 0.001f);
+        const float dr = 0.0017f, gap = 0.0052f;
+        const uint32_t on = dots <= 1 ? 0xe04040 : 0xffffff;
+        for (int k = 0; k < 4; k++) {
+            const Vec3 dc = bc + x * ((k - 1.5f) * gap);
+            if (k < dots) {
+                Vec3 poly[8];
+                for (int j = 0; j < 8; j++) {
+                    float ang = 6.2831853f * j / 8;
+                    poly[j] = to_view(t, dc + x * (dr * cosf(ang)) + z * (dr * sinf(ang)));
+                }
+                fill_poly_view(t, poly, 8, on);
+            } else {
+                circle3d(t, dc, x, z, dr, PIXEL_ALPHA | 0x606060);
+            }
+        }
+        if (c.charging) {
+            const Vec3 o = bc + x * (2.5f * gap);
+            const uint32_t bolt = PIXEL_ALPHA | 0xffe040;
+            line3d(t, o + x * 0.0012f - z * 0.0028f, o - x * 0.0010f + z * 0.0002f, bolt);
+            line3d(t, o - x * 0.0010f + z * 0.0002f, o + x * 0.0010f - z * 0.0002f, bolt);
+            line3d(t, o + x * 0.0010f - z * 0.0002f, o - x * 0.0012f + z * 0.0028f, bolt);
+        }
+    }
+
+    // Pressed buttons, drawn where they sit (measured on a CECH-ZCM1 photo): the Move button
+    // in the middle, square / triangle above left / right, cross / circle below, START on
+    // the right side, SELECT on the left side.
+    const Vec3 face = c.pos + y * (hw + 0.002f), up = z * -1.0f;
+    const float zc = 0.062f, dz = 0.0086f, dx = 0.0155f, s = 0.0036f;
+    const uint16_t b = c.buttons;
+    if (b & MOVE_BUTTON_SQUARE)
+        symbol_square(t, face + x * -dx + z * (zc - dz), x, up, s, PIXEL_ALPHA | 0xff80d0);
+    if (b & MOVE_BUTTON_TRIANGLE)
+        symbol_triangle(t, face + x * dx + z * (zc - dz), x, up, s, PIXEL_ALPHA | 0x40e0a0);
+    if (b & MOVE_BUTTON_CROSS)
+        symbol_cross(t, face + x * -dx + z * (zc + dz), x, up, s, PIXEL_ALPHA | 0x60a0ff);
+    if (b & MOVE_BUTTON_CIRCLE)
+        circle3d(t, face + x * dx + z * (zc + dz), x, up, s * 0.85f, PIXEL_ALPHA | 0xff5050);
+    if (b & MOVE_BUTTON_MOVE) {
+        ellipse3d(t, face + z * zc, x, up, 0.0068f, 0.0120f, PIXEL_ALPHA | 0xffffff);
+        ellipse3d(t, face + z * zc, x, up, 0.0042f, 0.0085f, PIXEL_ALPHA | 0xffffff);
+    }
+    if (b & MOVE_BUTTON_START)
+        rect3d(t, c.pos + x * (hw + 0.002f) + z * (r + 0.075f), z * 0.007f, y * 0.0025f, PIXEL_ALPHA | 0xffffff);
+    if (b & MOVE_BUTTON_SELECT)
+        rect3d(t, c.pos + x * -(hw + 0.002f) + z * (r + 0.075f), z * 0.007f, y * 0.0025f, PIXEL_ALPHA | 0xffffff);
+
+    // Trigger (T), under the sphere on the back, only while pressed: a T whose stem
+    // follows the trigger angle, from sticking out (released) towards the handle.
+    if (c.trigger > 0.02f) {
+        const float a = (35.0f + 40.0f * c.trigger) * 0.0174533f;
+        Vec3 pivot = c.pos - y * hw + z * (r + 0.010f);
+        Vec3 dir = y * -cosf(a) + z * sinf(a);
+        Vec3 tip = pivot + dir * 0.032f;
+        uint32_t tc = c.trigger >= 0.9f ? 0xffd040 : grey(0.45f + 0.55f * c.trigger) & 0xffffff;
+        line3d(t, pivot, tip, PIXEL_ALPHA | tc);
+        line3d(t, tip - x * 0.012f, tip + x * 0.012f, PIXEL_ALPHA | tc);
     }
 
     // Emulated trackpad: a ring on top of the handle, with the touch point.
@@ -247,25 +415,72 @@ static void draw_info_panel(const EyeTarget &t, const LobbyView *view)
     Vec3 right = v3(cosf(view->info_yaw), 0, -sinf(view->info_yaw));
     Vec3 up = v3(0, 1, 0);
     int n = 0;
-    while (n < 6 && view->info[n])
+    while (n < 8 && view->info[n])
         n++;
     for (int i = 0; i < n; i++) {
         const float hi = i == 0 ? h * 1.4f : h; // title larger
-        float w = text_width(view->info[i], hi);
+        float w = lobby_text_width(view->info[i], hi);
         Vec3 o = view->info_pos + right * (-w * 0.5f) + up * ((n - 1) * gap * 0.5f - i * gap);
         draw_text3d(t, o, right, up, hi, view->info[i], PIXEL_ALPHA | 0xffffff);
     }
 }
 
-void lobby_render_eye(uint32_t *pixels, int width, int height, int pitch, const LobbyView *view, int eye)
+static void draw_panel(const EyeTarget &t, const LobbyPanel &p)
 {
-    const uint32_t bg = PIXEL_ALPHA | 0x06080c;
-    const uint64_t bg2 = (uint64_t)bg << 32 | bg;
+    auto at = [&](float px, float py) { return p.origin + p.right * px + p.up * py; };
+    for (int i = 0; i < p.count; i++) {
+        const LobbyPanelItem &it = p.items[i];
+        if (it.fill)
+            fill_quad3d(t, at(it.x0, it.y0), at(it.x1, it.y0), at(it.x1, it.y1), at(it.x0, it.y1), it.fill);
+        if (it.outline) {
+            const uint32_t c = PIXEL_ALPHA | it.outline;
+            line3d(t, at(it.x0, it.y0), at(it.x1, it.y0), c);
+            line3d(t, at(it.x1, it.y0), at(it.x1, it.y1), c);
+            line3d(t, at(it.x1, it.y1), at(it.x0, it.y1), c);
+            line3d(t, at(it.x0, it.y1), at(it.x0, it.y0), c);
+        }
+        if (it.text && it.text[0]) {
+            const float w = lobby_text_width(it.text, it.text_h), margin = it.text_h * 0.6f;
+            float tx = it.align < 0 ? it.x0 + margin : it.align > 0 ? it.x1 - margin - w : (it.x0 + it.x1 - w) * 0.5f;
+            float ty = (it.y0 + it.y1 - it.text_h) * 0.5f;
+            draw_text3d(t, at(tx, ty), p.right, p.up, it.text_h, it.text, PIXEL_ALPHA | it.text_rgb);
+        }
+    }
+}
+
+static void draw_pointer(const EyeTarget &t, const LobbyPointer &ptr, const LobbyPanel *panel)
+{
+    line3d(t, ptr.from, ptr.to, PIXEL_ALPHA | ptr.rgb);
+    if (ptr.hit && panel) {
+        circle3d(t, ptr.to, panel->right, panel->up, 0.008f, PIXEL_ALPHA | 0xffffff);
+        circle3d(t, ptr.to, panel->right, panel->up, 0.003f, PIXEL_ALPHA | 0xffffff);
+    }
+}
+
+// Scales every pixel of the eye image by f (0..256), keeping the alpha.
+static void darken(uint32_t *pixels, int width, int height, int pitch, uint32_t f)
+{
+    for (int yy = 0; yy < height; yy++) {
+        uint32_t *row = pixels + (size_t)yy * pitch;
+        for (int xx = 0; xx < width; xx++) {
+            uint32_t p = row[xx];
+            row[xx] = PIXEL_ALPHA | (((p & 0xff00ff) * f >> 8) & 0xff00ff) | (((p & 0x00ff00) * f >> 8) & 0x00ff00);
+        }
+    }
+}
+
+static void fill(uint32_t *pixels, int width, int height, int pitch, uint32_t c)
+{
+    const uint64_t c2 = (uint64_t)c << 32 | c;
     for (int yy = 0; yy < height; yy++) {
         uint64_t *row = (uint64_t *)(pixels + (size_t)yy * pitch);
         for (int xx = 0; xx < width / 2; xx++)
-            row[xx] = bg2;
+            row[xx] = c2;
     }
+}
+
+void lobby_render_eye(uint32_t *pixels, int width, int height, int pitch, const LobbyView *view, int eye)
+{
     EyeTarget t;
     t.pixels = pixels;
     t.x0 = 0;
@@ -275,22 +490,35 @@ void lobby_render_eye(uint32_t *pixels, int width, int height, int pitch, const 
     t.eye_pos = view->eye_pos[eye];
     t.inv_rot = conj(view->eye_rot[eye]);
     t.fov = view->fov[eye];
-    if (view->grey) {
-        // Headset lost by the camera: plain grey, like a "searching" headset.
-        const uint64_t g2 = (uint64_t)(PIXEL_ALPHA | 0x404040) << 32 | (PIXEL_ALPHA | 0x404040);
-        for (int yy = 0; yy < height; yy++) {
-            uint64_t *row = (uint64_t *)(pixels + (size_t)yy * pitch);
-            for (int xx = 0; xx < width / 2; xx++)
-                row[xx] = g2;
-        }
-        return;
+    const float b = view->brightness;
+    if (b <= 0.004f) {
+        fill(pixels, width, height, pitch, PIXEL_ALPHA);
+    } else {
+        fill(pixels, width, height, pitch, PIXEL_ALPHA | 0x06080c);
+        draw_scene(t, view);
+        if (view->info[0])
+            draw_info_panel(t, view);
+        if (view->panel && view->panel->visible)
+            draw_panel(t, *view->panel);
+        for (auto &c : view->controllers)
+            if (c.visible)
+                draw_controller(t, c);
+        for (auto &ptr : view->pointers)
+            if (ptr.visible)
+                draw_pointer(t, ptr, view->panel);
+        if (b < 0.996f)
+            darken(pixels, width, height, pitch, (uint32_t)(b * 256.0f));
     }
-    draw_scene(t, view);
-    if (view->info[0])
-        draw_info_panel(t, view);
-    for (auto &c : view->controllers)
-        if (c.visible)
-            draw_controller(t, c);
+    // Text attached to the view, 2 m ahead of the head.
+    if (view->overlay_text && view->overlay_brightness > 0.004f) {
+        const float h = 0.075f, w = lobby_text_width(view->overlay_text, h);
+        const Quat q = view->head_rot;
+        Vec3 right = rotate(q, v3(1, 0, 0)), up = rotate(q, v3(0, 1, 0));
+        Vec3 o = view->head_pos + rotate(q, v3(-w * 0.5f, -h * 0.5f, -2.0f));
+        int v = (int)(view->overlay_brightness * 255.0f);
+        v = v > 255 ? 255 : v;
+        draw_text3d(t, o, right, up, h, view->overlay_text, PIXEL_ALPHA | v << 16 | v << 8 | v);
+    }
 }
 
 void lobby_render(uint32_t *pixels, int width, int height, int pitch, const LobbyView *view)

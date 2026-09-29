@@ -13,6 +13,16 @@ struct ClientConfig {
     int resolution_percent;
     // Extra controller prediction on top of SteamVR's own (which uses the velocities).
     int controller_prediction_ms;
+    // Height of the PS Camera above the floor, derived from the user's height in the lobby
+    // settings. 0 = not set yet: the floor is guessed from the first headset position.
+    int camera_height_cm;
+    // User's height, set in the lobby settings (0 = not set). Each change places the floor
+    // below the headset at the matching eye height, stored as camera_height_cm.
+    int user_height_cm;
+    // Play space centre placed on the headset each time SteamVR connects (1, default) or
+    // only once at the first tracking (0: for the tracker mode, where Space Calibrator's
+    // calibration must survive SteamVR restarts).
+    int center_on_connect;
 };
 
 void config_load(ClientConfig *cfg);

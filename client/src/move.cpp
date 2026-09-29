@@ -1,6 +1,8 @@
 #include "move.h"
 
+#include <fcntl.h>
 #include <string.h>
+#include <sys/ioctl.h>
 
 #include <orbis/libkernel.h>
 
@@ -47,6 +49,68 @@ static void *resolve(int module, const char *name)
     return fn;
 }
 
+// Raw HID input reports, as libSceMove reads them (reference/decomp/move_battery.c): the
+// Move handle is the HID handle; each entry is a timestamp, a kernel flag byte, then the PS
+// Move input report (report id at data[1], battery at data[0x0d]). Reports are consumed
+// when read, so polling steals one sample from libSceMove: done only every 5 s.
+struct HidReport {
+    uint64_t timestamp_us;
+    uint8_t data[0x38];
+};
+
+struct HidReadReports {
+    uint32_t handle;
+    uint32_t pad0;
+    HidReport *reports;
+    uint32_t max_reports;
+    uint32_t pad1;
+    int32_t *device_id;
+};
+static_assert(sizeof(HidReadReports) == 0x20, "ioctl 0xc0204834 argument size");
+
+static int read_battery(int index, int handle)
+{
+    static int fd = -2;
+    if (fd == -2) {
+        fd = open("/dev/hid", O_RDONLY);
+        LOG("move: open(/dev/hid) -> %d", fd);
+    }
+    if (fd < 0)
+        return -1;
+    HidReport rep;
+    int32_t device_id = 0;
+    HidReadReports req;
+    memset(&req, 0, sizeof(req));
+    memset(&rep, 0, sizeof(rep));
+    req.handle = (uint32_t)handle;
+    req.reports = &rep;
+    req.max_reports = 1;
+    req.device_id = &device_id;
+    int n = ioctl(fd, 0xc0204834, &req);
+    static bool logged[MOVE_MAX];
+    if (!logged[index] && n > 0) {
+        logged[index] = true;
+        const uint8_t *d = rep.data;
+        LOG("move %d: raw report (count %d, device %d): flags %02x id %02x buttons %02x%02x%02x%02x trigger %02x "
+            "battery %02x temperature %u",
+            index, n, device_id, d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[0x0d], d[0x26] << 4 | d[0x27] >> 4);
+    }
+    if (n <= 0 || device_id == 0)
+        return -1;
+    const int b = rep.data[0x0d];
+    return b <= 5 || b == 0xEE || b == 0xEF ? b : -1;
+}
+
+bool move_battery(const MoveController &c, float *gauge, bool *charging)
+{
+    const int b = c.battery_raw;
+    if (!c.connected || b < 0)
+        return false;
+    *charging = b == 0xEE || b == 0xEF;
+    *gauge = b == 0xEF ? 1.0f : b == 0xEE ? 0.5f : b / 5.0f; // level unknown while charging
+    return true;
+}
+
 uint32_t move_led_rgb(uint32_t led_color)
 {
     // SceVrTrackerLedColor: blue, red, cyan (also listed as green), magenta, yellow.
@@ -65,6 +129,7 @@ void move_start(int module, int user_id, MoveController ctl[MOVE_MAX])
     for (int i = 0; i < MOVE_MAX; i++) {
         memset(&ctl[i], 0, sizeof(ctl[i]));
         ctl[i].handle = -1;
+        ctl[i].battery_raw = -1;
     }
     if (module < 0)
         return;
@@ -103,6 +168,19 @@ void move_update(MoveController ctl[MOVE_MAX])
         MoveController &c = ctl[i];
         if (c.handle < 0)
             continue;
+        uint64_t now = sceKernelGetProcessTime();
+        // Battery first: every libSceMove state call drains the pending HID reports, so
+        // right after ReadStateLatest the queue was almost always empty (one controller
+        // never got a reading). A failed read takes no report: retry on the next frame.
+        if (c.connected && now >= c.next_battery_us) {
+            int b = read_battery(i, c.handle);
+            if (b >= 0 && b != c.battery_raw)
+                LOG("move %d: battery 0x%02x", i, b);
+            if (b >= 0) {
+                c.battery_raw = b;
+                c.next_battery_us = now + 5000000;
+            }
+        }
         MoveData d;
         memset(&d, 0, sizeof(d));
         int rc = p_read_latest(c.handle, &d);
@@ -110,8 +188,9 @@ void move_update(MoveController ctl[MOVE_MAX])
         if (connected != c.connected) {
             LOG("move %d: %s (ReadStateLatest 0x%08x)", i, connected ? "connected" : "disconnected", (unsigned)rc);
             c.connected = connected;
+            c.battery_raw = -1;
+            c.next_battery_us = now;
         }
-        uint64_t now = sceKernelGetProcessTime();
         if (connected && !c.track.registered && now >= c.next_register_us) {
             if (!tracker_register_device(&c.track, TRACKER_DEVICE_MOVE, c.handle))
                 c.next_register_us = now + 2000000; // retry in 2 s

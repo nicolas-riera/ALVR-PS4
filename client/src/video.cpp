@@ -466,8 +466,22 @@ struct FfeJob {
     bool full_range;
 };
 
-// Each eye is converted in two bands: by the conversion thread and three helpers.
-static const int CONVERT_JOBS = 4;
+// Each eye is converted in three bands: by the conversion thread and five helpers (4 jobs
+// took ~5 ms per frame with foveated encoding; the PS4 has cores to spare while streaming).
+static const int CONVERT_JOBS = 6;
+static const int EYE_BANDS = CONVERT_JOBS / 2;
+// Conversion is on the latency path: above the default priority (700; 256 is the highest,
+// used by the decoder) so audio, network or tracker work does not preempt a band.
+static const int CONVERT_PRIORITY = 320;
+
+static void raise_priority(const char *who)
+{
+    int rc = scePthreadSetprio(scePthreadSelf(), CONVERT_PRIORITY);
+    static bool logged;
+    if (!logged || rc != 0)
+        LOG("video: %s priority %d -> 0x%08x", who, CONVERT_PRIORITY, (unsigned)rc);
+    logged = true;
+}
 static uint32_t g_row_buf[CONVERT_JOBS][3][EYE_MAX_W + 32] __attribute__((aligned(64)));
 
 static void blend_rows(const uint32_t *a, const uint32_t *b, int w, uint32_t *out, uint32_t n)
@@ -564,6 +578,7 @@ static void run_job(int i)
 static void *convert_thread(void *arg)
 {
     int index = (int)(intptr_t)arg;
+    raise_priority("conversion helper");
     unsigned seen = 0;
     for (;;) {
         pthread_mutex_lock(&g_job_lock);
@@ -812,6 +827,7 @@ static void decode_one(Slot &s, const uint8_t *config, size_t config_len)
 // here, right eye on the helper thread), then publication to the render loop.
 static void *convert_main_thread(void *)
 {
+    raise_priority("conversion");
     for (;;) {
         pthread_mutex_lock(&g_dec_lock);
         while (!g_has_pending)
@@ -856,12 +872,15 @@ static void *convert_main_thread(void *)
             pthread_mutex_unlock(&g_pub_lock);
             const uint8_t *y = (const uint8_t *)g_frame_buffers[d.fb];
             const uint8_t *uv = y + (size_t)d.pitch * d.height;
-            // Each eye in an upper and a lower band (even split rows keep chroma pairs).
-            uint32_t mid = ffe ? eye_h / 2 : (eye_h / 2) & ~1u;
+            // Each eye in EYE_BANDS horizontal bands (even split rows keep chroma pairs).
             for (int e = 0; e < 2; e++)
-                for (int half = 0; half < 2; half++) {
-                    Job &job = g_jobs[e * 2 + half];
-                    uint32_t r0 = half ? mid : 0, r1 = half ? eye_h : mid;
+                for (int band = 0; band < EYE_BANDS; band++) {
+                    Job &job = g_jobs[e * EYE_BANDS + band];
+                    auto split = [&](int b) -> uint32_t {
+                        uint32_t r = eye_h * (uint32_t)b / EYE_BANDS;
+                        return b == EYE_BANDS ? eye_h : ffe ? r : r & ~1u;
+                    };
+                    uint32_t r0 = split(band), r1 = split(band + 1);
                     job.ffe = ffe;
                     if (ffe)
                         job.fov = FfeJob{y, uv, d.pitch, e ? ax.compressed : 0, e, r0, r1,

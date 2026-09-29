@@ -31,8 +31,15 @@ struct MoveController {
     uint64_t next_register_us; // tracker registration retry time
     uint8_t vibration;         // current motor intensity
     uint64_t vibration_end_us; // 0 = no timed pulse
+    // Battery byte of the raw PS Move report: 0..5 (5 = full), 0xEE charging, 0xEF charged
+    // (on USB), -1 unknown. Read every 5 s (libSceMove itself discards it).
+    int battery_raw;
+    uint64_t next_battery_us;
     TrackedDevice track;
 };
+
+// Battery as a 0..1 gauge and charging flag; false when unknown.
+bool move_battery(const MoveController &ctl, float *gauge, bool *charging);
 
 // Opens both controllers for the user and registers them with the tracker
 // (call after tracker_start).

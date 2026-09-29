@@ -72,6 +72,16 @@ static int g_pending_count;
 static AlvrHandInput g_last_input[2];
 static bool g_input_sent_once[2];
 
+// Controller batteries (Battery packets): latest values from the render loop, sent by the
+// net thread when they change and every 10 s.
+struct BatteryState {
+    bool known;
+    float gauge; // 0..1
+    bool plugged;
+};
+static BatteryState g_battery[2], g_battery_sent[2];
+static uint64_t g_battery_sent_us[2];
+
 struct HandPaths {
     uint64_t menu, squeeze, trigger_click, trigger_value, stick_x, stick_y, stick_click, stick_touch, system;
 };
@@ -422,6 +432,30 @@ static void send_playspace_sync()
     control_send(w);
 }
 
+static void flush_battery()
+{
+    const uint64_t t = now_us();
+    for (int h = 0; h < 2; h++) {
+        pthread_mutex_lock(&g_lock);
+        BatteryState b = g_battery[h];
+        pthread_mutex_unlock(&g_lock);
+        if (!b.known)
+            continue;
+        const BatteryState &o = g_battery_sent[h];
+        if (g_battery_sent_us[h] && o.gauge == b.gauge && o.plugged == b.plugged && t - g_battery_sent_us[h] < 10000000)
+            continue;
+        uint8_t buf[32];
+        BinWriter w{buf, sizeof(buf), 0, false};
+        w.variant(C_BATTERY);
+        w.u64(g_ids_hand[h]);
+        w.f32(b.gauge);
+        w.u8(b.plugged);
+        control_send(w);
+        g_battery_sent[h] = b;
+        g_battery_sent_us[h] = t;
+    }
+}
+
 static void flush_buttons()
 {
     pthread_mutex_lock(&g_lock);
@@ -610,6 +644,7 @@ static void run_session(int fd, uint32_t server_ip_be)
         send_custom_interaction_profile();
         send_playspace_sync();
         memset(g_input_sent_once, 0, sizeof(g_input_sent_once));
+        memset(g_battery_sent_us, 0, sizeof(g_battery_sent_us));
     }
 
     // Streaming loop: keepalive, control packets, stream socket.
@@ -625,6 +660,7 @@ static void run_session(int fd, uint32_t server_ip_be)
                 last_tx = t;
             }
             flush_buttons();
+            flush_battery();
             if (video_want_idr()) {
                 control_send_unit(C_REQUEST_IDR);
                 LOG("alvr: IDR requested");
@@ -920,5 +956,14 @@ void alvr_update_input(int hand, const AlvrHandInput *in)
         queue_button(p.system, false, in->system);
     g_last_input[hand] = *in;
     g_input_sent_once[hand] = true;
+    pthread_mutex_unlock(&g_lock);
+}
+
+void alvr_set_battery(int hand, bool known, float gauge, bool plugged)
+{
+    if (hand < 0 || hand > 1)
+        return;
+    pthread_mutex_lock(&g_lock);
+    g_battery[hand] = BatteryState{known, gauge, plugged};
     pthread_mutex_unlock(&g_lock);
 }

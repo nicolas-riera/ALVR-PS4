@@ -20,7 +20,9 @@
 #include <orbis/UserService.h>
 
 #include "hmd.h"
+#include "hmd_setup.h"
 #include "lobby.h"
+#include "settings.h"
 #include "alvr_client.h"
 #include "config.h"
 #include "move.h"
@@ -33,6 +35,11 @@
 #include "video.h"
 
 #define ALVR_PS4_VERSION "0.9.3"
+#if ALVR_PS4_DEV
+#define ALVR_PS4_TITLE "ALVR PS4 (Dev)"
+#else
+#define ALVR_PS4_TITLE "ALVR PS4"
+#endif
 
 static char g_ip[16] = "?";
 
@@ -73,6 +80,8 @@ static ModuleProbe g_probes[] = {
     {"libSceAudioIn", 0x80000002, {"sceAudioInOpen", nullptr}},
     {"libSceHmdDistortion", 0, {nullptr}},
     {"libSceHmdReprojectionMultilayer", 0, {nullptr}},
+    {"libSceCommonDialog", 0x80000018, {"sceCommonDialogInitialize", nullptr}},
+    {"libSceHmdSetupDialog", 0x00EB, {"sceHmdSetupDialogInitialize", "sceHmdSetupDialogOpen", nullptr}},
 };
 static const int NUM_PROBES = sizeof(g_probes) / sizeof(g_probes[0]);
 
@@ -118,17 +127,38 @@ static WandInput g_wand[MOVE_MAX];
 static ClientConfig g_config;
 static bool g_floor_set = false; // cleared by a tracking reset: the tracker origin may move
 static float g_floor_y = -1.4f;   // tracker-space floor height, shared with the ALVR uplink
+// Headset tracking initialized: seen by the camera since the app started or since the
+// last tracking reset (back from the PS menu). Until then SteamVR shows it as searching
+// and the lobby is black.
+static bool g_hmd_tracking_init = false;
+static uint64_t g_hmd_init_after_us = 0; // sightings before this time do not count
+// Play space centre (tracker space x/z): the stage origin sent to SteamVR and the lobby
+// grid alignment. Set at the user's feet once the tracking is initialized, and again each
+// time SteamVR connects (user's choice, instead of a recentre button: the headset position
+// at SteamVR launch is the initial centre; SteamVR's own recentre does the rest). The
+// floor height and the forward direction never change.
+static bool g_center_set = false;
+static float g_center_x = 0.0f, g_center_z = 0.0f;
+static bool g_lobby_shown = false;             // the last frame was the lobby
+// First launch (no height saved yet): the height wizard shows in the lobby and the PC is
+// not searched for until it is confirmed.
+static bool g_wizard_pending = false; // also after a settings Reset
+static bool g_alvr_started = false;
 static void start_alvr();
 
-static void start_headset()
+static void init_user()
 {
     int rc = sceUserServiceInitialize(nullptr);
     if (rc < 0 && (unsigned)rc != 0x80960003 /* already initialized */)
         LOG("sceUserServiceInitialize -> 0x%08x", (unsigned)rc);
     rc = sceUserServiceGetInitialUser(&g_user_id);
     LOG("initial user id=0x%x (rc=0x%08x)", g_user_id, (unsigned)rc);
+}
 
-    if (hmd_start(g_probes[0].handle, g_user_id, &g_hmd))
+// Call after wait_for_headset: the headset is ready.
+static void start_headset()
+{
+    if (hmd_open(g_user_id, &g_hmd))
         LOG("headset opened, handle=0x%x", g_hmd.handle);
     else
         LOG("headset open FAILED");
@@ -143,7 +173,11 @@ static void start_headset()
         LOG("video decoder unavailable");
     if (!audio_init(g_probes[6].handle, g_probes[7].handle, g_user_id, alvr_send_microphone))
         LOG("audio unavailable");
-    start_alvr();
+    g_wizard_pending = g_config.user_height_cm <= 0;
+    if (g_wizard_pending)
+        LOG("first launch: the PC is searched for once the height is confirmed");
+    else
+        start_alvr();
 
     // The DualShock 4 is not used: not registered with the tracker, light bar reset
     // to the system's generic colour.
@@ -176,6 +210,8 @@ struct SystemServiceEvent {
 static auto const system_get_status = (int (*)(SystemServiceStatus *))sceSystemServiceGetStatus;
 static auto const system_receive_event = (int (*)(SystemServiceEvent *))sceSystemServiceReceiveEvent;
 
+static bool g_in_background = false; // PS menu or another app in front
+
 static void poll_system_events()
 {
     static SystemServiceStatus last;
@@ -191,6 +227,10 @@ static void poll_system_events()
             devs[i] = g_moves[i].track;
         tracker_recalibrate_all(devs, MOVE_MAX);
         g_floor_set = false;
+        // The headset counts as not initialized until the camera sees it again (stale
+        // results from before the recalibration are ignored).
+        g_hmd_tracking_init = false;
+        g_hmd_init_after_us = sceKernelGetProcessTime() + 300000;
     }
     if (st.is_system_ui_overlaid != last.is_system_ui_overlaid ||
         st.is_in_background_execution != last.is_in_background_execution ||
@@ -198,6 +238,7 @@ static void poll_system_events()
         LOG("system status: ui_overlaid=%d background=%d out_of_vr_play_area=%d", st.is_system_ui_overlaid,
             st.is_in_background_execution, st.is_out_of_vr_play_area);
     last = st;
+    g_in_background = st.is_in_background_execution;
     for (int i = 0; i < st.event_num; i++) {
         static SystemServiceEvent ev;
         if (system_receive_event(&ev) < 0)
@@ -274,6 +315,79 @@ static bool find_sent_pose(uint64_t timestamp_ns, ReprojPose *out)
     return true;
 }
 
+// Head for SteamVR and the lobby: centre between the eyes, orientation of the headset
+// (device pose if the eye poses are not filled). Tracker space.
+static void head_pose(float p[3], float q[4])
+{
+    const TrackerPose &l = g_tracker.eye_pose[0], &r = g_tracker.eye_pose[1], &d = g_tracker.device_pose;
+    bool eyes = l.qw * l.qw + l.qx * l.qx + l.qy * l.qy + l.qz * l.qz > 0.5f;
+    p[0] = eyes ? (l.px + r.px) * 0.5f : d.px;
+    p[1] = eyes ? (l.py + r.py) * 0.5f : d.py;
+    p[2] = eyes ? (l.pz + r.pz) * 0.5f : d.pz;
+    q[0] = eyes ? l.qx : d.qx;
+    q[1] = eyes ? l.qy : d.qy;
+    q[2] = eyes ? l.qz : d.qz;
+    q[3] = eyes ? l.qw : d.qw;
+}
+
+// Headset not usable: never seen since the start / the last reset, or not seen by the
+// camera for 3 s. SteamVR then shows it as searching; the lobby fades to black.
+static bool headset_lost(uint64_t now)
+{
+    return !g_hmd_tracking_init || now - g_tracker.last_seen_us > TRACKER_HMD_SEARCHING_US;
+}
+
+static void set_center_at_head(const char *why)
+{
+    float p[3], q[4];
+    head_pose(p, q);
+    g_center_x = p[0];
+    g_center_z = p[2];
+    g_center_set = true;
+    LOG("play space centre at x=%.3f z=%.3f (%s)", g_center_x, g_center_z, why);
+}
+
+// Lobby haptic ticks only while no PC is connected (then ALVR drives the motors).
+static bool lobby_haptics_allowed()
+{
+    AlvrStatus st;
+    alvr_get_status(&st);
+    return st.state != ALVR_STREAMING;
+}
+
+// Once per frame, before the uplink: tracking initialization, floor, play space centre.
+static void update_tracking_state(bool streaming)
+{
+    if (!g_hmd_tracking_init && g_tracker.status == 1 && g_tracker.last_seen_us &&
+        g_tracker.last_seen_us > g_hmd_init_after_us) {
+        g_hmd_tracking_init = true;
+        LOG("headset tracking initialized");
+        if (!g_center_set)
+            set_center_at_head("default: at the user's feet");
+    }
+    // SteamVR connected: its initial centre is where the headset is (once the headset is
+    // tracked, if it is not yet).
+    static bool was_streaming = false, center_pending = false;
+    if (streaming && !was_streaming && g_config.center_on_connect)
+        center_pending = true;
+    was_streaming = streaming;
+    if (center_pending && g_hmd_tracking_init) {
+        set_center_at_head("SteamVR connected");
+        center_pending = false;
+    }
+    if (g_config.camera_height_cm > 0) {
+        g_floor_y = -g_config.camera_height_cm / 100.0f;
+        g_floor_set = true;
+    } else if (!g_floor_set && g_hmd_tracking_init && g_tracker.position_quality == 9) {
+        // Until the height is set: the default height shown in the settings, standing.
+        float hp[3], hq[4];
+        head_pose(hp, hq);
+        g_floor_y = hp[1] - SETTINGS_DEFAULT_USER_HEIGHT_CM * SETTINGS_EYE_HEIGHT_RATIO / 100.0f;
+        g_floor_set = true;
+        LOG("floor estimated at y=%.3f (head y=%.3f)", g_floor_y, hp[1]);
+    }
+}
+
 static unsigned g_video_shown_seq; // last video frame handed to the compositor
 
 // Streamed frame: shown through the compositor with the pose it was rendered for.
@@ -343,14 +457,12 @@ static bool render_video()
 // system compositor together with the pose it was rendered for.
 static bool render_lobby(Screen *s)
 {
-    float &floor_y = g_floor_y;
+    (void)s;
+    const float floor_y = g_floor_y;
     const TrackerPose &tp = g_tracker.device_pose;
-    if (!g_floor_set && g_tracker.status == 1 && g_tracker.position_quality == 9) {
-        floor_y = tp.py - 1.3f; // seated height guess until a proper floor calibration exists
-        g_floor_set = true;
-        LOG("lobby: floor set at y=%.3f (head y=%.3f)", floor_y, tp.py);
-    }
+    const uint64_t now = sceKernelGetProcessTime();
     LobbyView view;
+    memset(&view, 0, sizeof(view));
     // Render each eye from the tracker's own eye pose: the device pose is not at eye
     // level and does not rotate about the neck, which put the camera too low and made
     // the perspective wrong when turning the head.
@@ -374,10 +486,17 @@ static bool render_lobby(Screen *s)
         LOG("poses: device p=(%.3f %.3f %.3f) left eye p=(%.3f %.3f %.3f) right eye p=(%.3f %.3f %.3f) head p=(%.3f %.3f %.3f) ipd=%.4f",
             tp.px, tp.py, tp.pz, l.px, l.py, l.pz, r.px, r.py, r.pz, h.px, h.py, h.pz, sqrtf(dx * dx + dy * dy + dz * dz));
     }
+    float hp[3], hq[4];
+    head_pose(hp, hq);
+    view.head_pos = v3(hp[0], hp[1], hp[2]);
+    view.head_rot = Quat{hq[0], hq[1], hq[2], hq[3]};
     const HmdFieldOfView &f = g_hmd.fov;
     view.fov[0] = EyeFov{f.tan_out, f.tan_in, f.tan_top, f.tan_bottom};
     view.fov[1] = EyeFov{f.tan_in, f.tan_out, f.tan_top, f.tan_bottom};
     view.floor_y = floor_y;
+    view.center_x = g_center_x;
+    view.center_z = g_center_z;
+    SettingsRay rays[2];
     for (int i = 0; i < MOVE_MAX; i++) {
         const MoveController &m = g_moves[i];
         LobbyView::Controller &c = view.controllers[i];
@@ -393,16 +512,71 @@ static bool render_lobby(Screen *s)
         c.pad_click = w.pad_click;
         c.pad_x = w.pad_x;
         c.pad_y = w.pad_y;
+        c.buttons = m.connected ? m.buttons : 0;
+        c.trigger = m.connected ? m.trigger / 255.0f : 0.0f;
+        c.battery = -1.0f;
+        move_battery(m, &c.battery, &c.charging);
+        // Settings laser: from the sphere along the controller's forward (-Z).
+        rays[i].valid = c.visible && m.track.has_orientation;
+        rays[i].origin = c.pos;
+        rays[i].dir = rotate(c.rot, v3(0, 0, -1));
+        rays[i].trigger = c.trigger;
     }
-    // The 2 s "searching" state of the headset is only reported to SteamVR.
-    view.grey = false;
+
+    // Settings panel (START in the lobby), or the first launch wizard.
+    static LobbyPanel panel;
+    if (g_wizard_pending && !settings_is_open() && !headset_lost(now))
+        settings_open_wizard(v3(hp[0], hp[1], hp[2]));
+    if (settings_is_open()) {
+        int moves_on = 0;
+        for (int i = 0; i < MOVE_MAX; i++)
+            moves_on += g_moves[i].connected;
+        SettingsContext ctx{&g_config, floor_y, hp[1], moves_on};
+        int clicked = -1;
+        unsigned actions = settings_update(ctx, rays, now, &clicked);
+        if (clicked >= 0 && lobby_haptics_allowed())
+            move_vibrate(&g_moves[clicked], 150, 30);
+        if (actions & SETTINGS_HEIGHT_CHANGED)
+            g_floor_y = -g_config.camera_height_cm / 100.0f;
+        if (actions & SETTINGS_RESET) {
+            g_floor_set = false; // guessed again from the headset height
+            g_wizard_pending = true; // the height wizard opens on the next frame
+        }
+        if ((actions & SETTINGS_CONFIRMED) && g_wizard_pending) {
+            g_wizard_pending = false;
+            start_alvr(); // once: after a Reset the PC link is already running
+        }
+    }
+    settings_build(&panel, view.pointers);
+    view.panel = &panel;
+    view.floor_y = g_floor_y;
+
+    // Headset not initialized, or lost for 3 s: fade to black (0.5 s) with a message
+    // attached to the view. The app starts black: no fade-in at launch, only the fade-out.
+    static float lost_black = 1.0f;
+    static uint64_t last_us = now;
+    const float step = (now - last_us) / 500000.0f;
+    last_us = now;
+    if (headset_lost(now))
+        lost_black = lost_black + step > 1.0f ? 1.0f : lost_black + step;
+    else
+        lost_black = lost_black - step < 0.0f ? 0.0f : lost_black - step;
+    view.brightness = 1.0f - lost_black;
+    view.overlay_text = "Headset not detected by PSCamera.";
+    view.overlay_brightness = lost_black;
+
     // Info panel, once, far in front (towards the camera, 3 m beyond it).
-    static char info_lines[5][96];
-    snprintf(info_lines[0], sizeof(info_lines[0]), "ALVR PS4");
+    static char info_lines[6][96];
+    snprintf(info_lines[0], sizeof(info_lines[0]), "%s", ALVR_PS4_TITLE);
     AlvrStatus st;
     alvr_get_status(&st);
-    switch (st.state) {
+    const bool waiting_height = g_wizard_pending && !g_alvr_started;
+    switch (waiting_height ? ALVR_DISCOVERY : st.state) {
     case ALVR_DISCOVERY:
+        if (waiting_height) {
+            snprintf(info_lines[1], sizeof(info_lines[1]), "Set your height to continue");
+            break;
+        }
         snprintf(info_lines[1], sizeof(info_lines[1]), "Waiting for the PC (ALVR streamer %s)", ALVR_STREAMER_VERSION);
         break;
     case ALVR_WAITING:
@@ -422,10 +596,11 @@ static bool render_lobby(Screen *s)
     snprintf(info_lines[2], sizeof(info_lines[2]), "Hostname: %s", g_config.hostname);
     snprintf(info_lines[3], sizeof(info_lines[3]), "IP: %s", g_ip);
     snprintf(info_lines[4], sizeof(info_lines[4]), "Client v%s", ALVR_PS4_VERSION);
-    for (int i = 0; i < 5; i++)
+    snprintf(info_lines[5], sizeof(info_lines[5]), "%s", g_wizard_pending ? "" : "Press Start to open settings");
+    for (int i = 0; i < 6; i++)
         view.info[i] = info_lines[i];
-    view.info[5] = nullptr;
-    view.info_pos = v3(0.0f, floor_y + 1.6f, -3.0f);
+    view.info[6] = nullptr;
+    view.info_pos = v3(0.0f, g_floor_y + 1.6f, -3.0f);
     view.info_yaw = 0.0f;
     // Each eye gets its own 960x1080 image with pitch == width: with both eyes in one
     // 1920-wide buffer the compositor ignored the pitch and mixed the eyes row by row.
@@ -501,6 +676,9 @@ static void haptics_to_move(int hand, float duration_s, float frequency, float a
 
 static void start_alvr()
 {
+    if (g_alvr_started)
+        return;
+    g_alvr_started = true;
     AlvrViews views;
     views.view_width = (uint32_t)(960 * g_config.resolution_percent / 100);
     views.view_height = (uint32_t)(1080 * g_config.resolution_percent / 100);
@@ -522,9 +700,9 @@ static void start_alvr()
 static void to_stage(const float p[3], const float q[4], AlvrDeviceMotion *m)
 {
     m->present = true;
-    m->position[0] = p[0];
+    m->position[0] = p[0] - g_center_x;
     m->position[1] = p[1] - g_floor_y;
-    m->position[2] = p[2];
+    m->position[2] = p[2] - g_center_z;
     for (int i = 0; i < 4; i++)
         m->orientation[i] = q[i];
     memset(m->linear_velocity, 0, sizeof(m->linear_velocity));
@@ -535,20 +713,20 @@ static void send_alvr_uplink()
 {
     AlvrDeviceMotion head, hands[2];
     // Head: centre between the eyes, orientation of the headset (always sent).
-    const TrackerPose &l = g_tracker.eye_pose[0], &r = g_tracker.eye_pose[1], &d = g_tracker.device_pose;
-    bool eyes = l.qw * l.qw + l.qx * l.qx + l.qy * l.qy + l.qz * l.qz > 0.5f;
-    float hp[3] = {eyes ? (l.px + r.px) * 0.5f : d.px, eyes ? (l.py + r.py) * 0.5f : d.py,
-                   eyes ? (l.pz + r.pz) * 0.5f : d.pz};
-    float hq[4] = {eyes ? l.qx : d.qx, eyes ? l.qy : d.qy, eyes ? l.qz : d.qz, eyes ? l.qw : d.qw};
+    float hp[3], hq[4];
+    head_pose(hp, hq);
     to_stage(hp, hq, &head);
     const uint64_t now = sceKernelGetProcessTime();
-    // Headset not seen by the camera for 3 s: SteamVR shows it as searching (grey screen).
-    // The 20.14.1 protocol cannot say so; the patched driver (tools/alvr_driver_patch.py)
-    // treats a head below -500 m as out of range. Only SteamVR sees this, not the lobby.
-    bool head_lost = !g_tracker.last_seen_us || now - g_tracker.last_seen_us > TRACKER_HMD_SEARCHING_US;
+    // Headset tracking not initialized yet (start, back from the PS menu): searching right
+    // away. Once initialized: searching after 3 s without the camera seeing it (grey
+    // screen). The 20.14.1 protocol cannot say so; the patched driver
+    // (tools/alvr_driver_patch.py) treats a head below -500 m as out of range.
+    bool head_lost = headset_lost(now);
     static bool head_lost_logged;
     if (head_lost != head_lost_logged) {
-        LOG("headset %s", head_lost ? "lost for 3 s: reported as searching to SteamVR" : "tracked again");
+        LOG("headset %s", !head_lost             ? "tracked again"
+                          : !g_hmd_tracking_init ? "tracking not initialized: reported as searching to SteamVR"
+                                                 : "lost for 3 s: reported as searching to SteamVR");
         head_lost_logged = head_lost;
     }
     if (head_lost)
@@ -562,10 +740,18 @@ static void send_alvr_uplink()
         // controllers with them over its own pipeline latency.
         memcpy(hm.linear_velocity, m.track.velocity, sizeof(hm.linear_velocity));
         memcpy(hm.angular_velocity, m.track.angular_velocity, sizeof(hm.angular_velocity));
-        // Lost controllers keep their last pose for 10 s, then are omitted, which is how
-        // the 20.14.1 protocol reports a controller that is not tracked.
-        hm.present = m.connected && m.track.has_position && m.track.last_seen_us &&
-                     now - m.track.last_seen_us <= TRACKER_CONTROLLER_SEARCHING_US;
+        // A controller switched on is always sent (omitted = disconnected, inputs dropped).
+        // Lost by the camera it keeps its last pose for 10 s, then (or when never seen) it
+        // is marked searching with a height below -500 m: the patched driver
+        // (tools/alvr_driver_patch.py) hides it but keeps its buttons working.
+        hm.present = m.connected;
+        if (!m.track.has_position || !m.track.last_seen_us ||
+            now - m.track.last_seen_us > TRACKER_CONTROLLER_SEARCHING_US)
+            hm.position[1] = -1000.0f;
+        float gauge = 0.0f;
+        bool charging = false;
+        const bool battery_known = move_battery(m, &gauge, &charging);
+        alvr_set_battery(hand, battery_known, gauge, charging);
         const WandInput &w = g_wand[i];
         AlvrHandInput in;
         in.trackpad_touch = w.pad_touch;
@@ -583,43 +769,108 @@ static void send_alvr_uplink()
     alvr_send_tracking(now * 1000ull, &head, &hands[0], &hands[1]);
 }
 
-static void draw(Screen *s, unsigned frame)
+// TV / floating 2D screen: title and one status line (no debug output).
+static void draw_status(Screen *s, const char *status)
 {
-    screen_fill(s, 0x101820);
-    screen_rect(s, 0, 0, s->width, 90, 0x1f3a5f);
-    screen_text(s, 40, 20, "ALVR PS4 client  v" ALVR_PS4_VERSION, 0xffffff);
+    screen_fill(s, 0x06080c);
+    screen_text(s, 80, s->height / 2 - 40, ALVR_PS4_TITLE "  v" ALVR_PS4_VERSION, 0xffffff);
+    screen_text(s, 80, s->height / 2, status, 0xa0c4ff);
+}
 
-    char line[160];
-    uint64_t secs = sceKernelGetProcessTime() / 1000000;
-    snprintf(line, sizeof(line), "PS4 IP: %s    logs: UDP broadcast port %d    uptime: %llus    frame: %u",
-             g_ip, LOG_UDP_PORT, (unsigned long long)secs, frame);
-    screen_text(s, 40, 52, line, 0xa0c4ff);
+// Before anything VR: wait until the headset is ready (connected, powered, processor
+// unit USB plugged), showing the system's "connect your PlayStation VR" dialog meanwhile,
+// reopened if canceled (as VR Worlds does). NOT_READY is also a headset powering on, so
+// it gets 1 s before the dialog is asked for.
+static void wait_for_headset(Screen *s)
+{
+    init_user();
+    if (!hmd_init(g_probes[0].handle, &g_hmd)) {
+        LOG("libSceHmd unavailable");
+        return;
+    }
+    const bool dialog = hmd_setup_init(g_probes[10].handle, g_probes[11].handle);
+    uint32_t last_status = 0xffffffff;
+    uint64_t status_since = 0, next_try_us = 0;
+    for (;;) {
+        hmd_refresh(&g_hmd);
+        const uint32_t status = g_hmd.info.status;
+        const uint64_t now = sceKernelGetProcessTime();
+        if (status != last_status) {
+            LOG("headset status: %s", hmd_status_name(status));
+            last_status = status;
+            status_since = now;
+        }
+        hmd_setup_poll();
+        if (status == HMD_STATUS_READY && !hmd_setup_running())
+            break;
+        if (status != HMD_STATUS_READY && dialog && !hmd_setup_running() && now >= next_try_us &&
+            (status != HMD_STATUS_NOT_READY || now - status_since > 1000000) && !hmd_setup_start(g_user_id))
+            next_try_us = now + 1000000;
+        if (s->handle > 0) {
+            draw_status(s, "Connect PlayStation VR and turn it on");
+            screen_flip(s);
+        } else {
+            sceKernelUsleep(16000);
+        }
+        sceGnmSubmitDone(); // the system's safe point to suspend or close the app
+    }
+    LOG("headset ready");
+}
 
-    if (g_hmd.initialized)
-        snprintf(line, sizeof(line), "PSVR: %s  handle=0x%x  panel %ux%u", hmd_status_name(g_hmd.info.status),
-                 g_hmd.handle, g_hmd.info.panel_width, g_hmd.info.panel_height);
-    else
-        snprintf(line, sizeof(line), "PSVR: libSceHmd not initialized");
-    screen_rect(s, 0, 90, s->width, 34, 0x16283f);
-    screen_text(s, 40, 95, line, g_hmd.info.status == HMD_STATUS_READY ? 0x40ff80 : 0xffc040);
+// While running: when the headset stops being ready (powered off, unplugged), the setup
+// dialog asks for it again (not while the app is in the background). Once it is back,
+// a handle made invalid by the power cycle is reopened and registered with the tracker
+// again, and the tracking counts as not initialized until the camera sees the headset.
+static void monitor_headset(unsigned frame, uint64_t now)
+{
+    static bool lost = false;
+    static uint64_t status_since = 0, next_try_us = 0;
+    if (!g_hmd.initialized)
+        return;
+    if (frame % 15 == 0) {
+        const uint32_t prev = g_hmd.info.status;
+        hmd_refresh(&g_hmd);
+        if (g_hmd.info.status != prev) {
+            LOG("HMD status changed: %s -> %s", hmd_status_name(prev), hmd_status_name(g_hmd.info.status));
+            status_since = now;
+        }
+    }
+    hmd_setup_poll();
+    const uint32_t status = g_hmd.info.status;
+    if (status != HMD_STATUS_READY) {
+        if (!lost)
+            LOG("headset not ready (%s)", hmd_status_name(status));
+        lost = true;
+        if (!g_in_background && !hmd_setup_running() && now >= next_try_us &&
+            (status != HMD_STATUS_NOT_READY || now - status_since > 1000000) && !hmd_setup_start(g_user_id))
+            next_try_us = now + 2000000;
+    } else if (lost && !hmd_setup_running()) {
+        lost = false;
+        LOG("headset ready again");
+        if (!hmd_handle_valid(&g_hmd) && hmd_reopen(g_user_id, &g_hmd))
+            tracker_reregister_hmd(g_hmd.handle);
+        g_hmd_tracking_init = false;
+        g_hmd_init_after_us = now + 300000;
+    }
+}
 
-    // Heartbeat square: proves the render loop is alive.
-    screen_rect(s, s->width - 80, 25, 40, 40, (frame / 30) % 2 ? 0x40ff80 : 0x205030);
-
-    static char lines[LOG_RING_LINES][LOG_LINE_MAX];
-    int n = log_snapshot(lines);
-    const TrackerPose &pz = g_tracker.device_pose;
-    snprintf(line, sizeof(line), "Tracker: %s  status=%s pos=%s orient=%s  q=(%+.3f %+.3f %+.3f %+.3f) p=(%+.3f %+.3f %+.3f)  camera=%d",
-             g_tracker.hmd_registered ? "HMD registered" : "off", tracker_status_name(g_tracker.status),
-             tracker_quality_name(g_tracker.position_quality), tracker_quality_name(g_tracker.orientation_quality),
-             pz.qx, pz.qy, pz.qz, pz.qw, pz.px, pz.py, pz.pz, g_tracker.camera_attached);
-    screen_rect(s, 0, 124, s->width, 30, 0x16283f);
-    screen_text(s, 40, 127, line, g_tracker.status == 1 ? 0x40ff80 : 0xffc040);
-
-    int y = 164;
-    for (int i = 0; i < n && y < s->height - 30; i++, y += 24) {
-        uint32_t color = strstr(lines[i], "FAIL") || strstr(lines[i], "MISSING") ? 0xff7070 : 0xd0d0d0;
-        screen_text(s, 40, y, lines[i], color);
+// START on either Move opens / closes the settings in the lobby (not while the lobby is
+// black: headset not detected). While streaming, START is SteamVR's system button.
+static void handle_start_button(uint64_t now)
+{
+    static bool was_pressed[MOVE_MAX];
+    for (int i = 0; i < MOVE_MAX; i++) {
+        const bool pressed = g_moves[i].connected && (g_moves[i].buttons & MOVE_BUTTON_START);
+        if (pressed && !was_pressed[i] && g_lobby_shown && !headset_lost(now) && !settings_is_wizard()) {
+            if (settings_is_open()) {
+                settings_close();
+            } else {
+                float p[3], q[4];
+                head_pose(p, q);
+                settings_open(v3(p[0], p[1], p[2]));
+            }
+        }
+        was_pressed[i] = pressed;
     }
 }
 
@@ -627,7 +878,7 @@ int main()
 {
     setvbuf(stdout, nullptr, _IONBF, 0);
     log_init();
-    LOG("ALVR PS4 client v%s starting", ALVR_PS4_VERSION);
+    LOG("%s client v%s starting", ALVR_PS4_TITLE, ALVR_PS4_VERSION);
 
     read_ip();
     config_load(&g_config);
@@ -639,6 +890,7 @@ int main()
     }
 
     probe_modules();
+    wait_for_headset(&screen);
     start_headset();
 
     // Display through the system VR compositor: our status screen becomes the
@@ -658,18 +910,21 @@ int main()
     for (;;) {
         tracker_update(&g_tracker);
         move_update(g_moves);
+        const uint64_t now = sceKernelGetProcessTime();
         AlvrStatus alvr_st;
         alvr_get_status(&alvr_st);
         bool pc_connected = alvr_st.state == ALVR_STREAMING;
+        update_tracking_state(pc_connected);
         for (int i = 0; i < MOVE_MAX; i++) {
             WandInput prev = g_wand_emu[i].last;
             wand_update(&g_wand_emu[i], move_index_hand(i), g_moves[i], &g_wand[i]);
             const WandInput &w = g_wand[i];
             // Lobby haptics feedback, only while no PC is connected (then ALVR drives the
-            // motors): a tick on pad click and grip, a longer buzz on a full trigger pull.
+            // motors): a tick on pad click and grip, a longer buzz on a full trigger pull
+            // (not while the settings are open: the trigger clicks their buttons).
             if (!pc_connected && ((w.pad_click && !prev.pad_click) || (w.grip && !prev.grip)))
                 move_vibrate(&g_moves[i], 150, 40);
-            if (!pc_connected && w.trigger >= 0.9f && prev.trigger < 0.9f)
+            if (!pc_connected && !settings_is_open() && w.trigger >= 0.9f && prev.trigger < 0.9f)
                 move_vibrate(&g_moves[i], 220, 120);
             if (w.pad_click != prev.pad_click || w.grip != prev.grip || w.menu != prev.menu ||
                 w.system != prev.system || w.trigger_click != prev.trigger_click)
@@ -678,20 +933,26 @@ int main()
                     w.pad_click ? "+click" : "", w.pad_x, w.pad_y, w.grip, w.menu, w.system, w.trigger,
                     w.trigger_click ? " (click)" : "");
         }
+        handle_start_button(now);
         send_alvr_uplink();
         if (screen.handle > 0 && reproj_active()) {
-            // 3D lobby once the tracker has given an orientation; the 2D status screen is
-            // only shown before that. Afterwards the lobby keeps the last pose (the quality
+            // 3D lobby once the tracker has given an orientation; a plain 2D screen is only
+            // shown before that. Afterwards the lobby keeps the last pose (the quality
             // drops briefly during a tracking reset, which flashed the 2D screen).
             static bool lobby_started = false;
             if (g_tracker.results_ok && g_tracker.orientation_quality != 0)
                 lobby_started = true;
             bool stereo_video = pc_connected && render_video();
             bool stereo = stereo_video;
-            if (!stereo)
-                stereo = lobby_started && render_lobby(&screen);
+            g_lobby_shown = false;
             if (!stereo) {
-                draw(&screen, frame);
+                stereo = lobby_started && render_lobby(&screen);
+                g_lobby_shown = stereo;
+            }
+            if (!g_lobby_shown)
+                settings_close(); // the settings only live in the lobby
+            if (!stereo) {
+                draw_status(&screen, "Starting...");
                 static GnmTexture tex[2];
                 gnm_texture_linear_bgra(&tex[screen.cur], screen.buffers[screen.cur], screen.width, screen.height,
                                         screen.width);
@@ -719,17 +980,12 @@ int main()
                 sceKernelUsleep((uint32_t)(next_us - now_us));
             }
         } else if (screen.handle > 0) {
-            draw(&screen, frame);
+            draw_status(&screen, "PlayStation VR not available");
             screen_flip(&screen);
         } else {
             sceKernelUsleep(16000);
         }
-        if (frame % 60 == 0 && g_hmd.initialized) {
-            uint32_t prev = g_hmd.info.status;
-            hmd_refresh(&g_hmd);
-            if (g_hmd.info.status != prev)
-                LOG("HMD status changed: %s -> %s", hmd_status_name(prev), hmd_status_name(g_hmd.info.status));
-        }
+        monitor_headset(frame, sceKernelGetProcessTime());
         if (frame % 30 == 0)
             poll_system_events();
         if (frame % 60 == 30 && g_tracker.results_ok) {

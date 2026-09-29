@@ -1,20 +1,23 @@
 """Upload the built .pkg to the PS4 over GoldHEN's FTP.
 
-Usage: python tools/deploy.py [ps4_ip] [port]
+Usage: python tools/deploy.py [--stable] [ps4_ip] [port]
+Uploads the Dev package ("ALVR PS4 (Dev)", title id ALVR00002) unless --stable is given.
 The package lands in /data/pkg/, where GoldHEN's Package Installer lists it.
 """
 import ftplib
-import glob
 import os
 import sys
 
-ip = sys.argv[1] if len(sys.argv) > 1 else "192.168.0.124"
-port = int(sys.argv[2]) if len(sys.argv) > 2 else 2121
+args = [a for a in sys.argv[1:] if a != "--stable"]
+stable = len(args) != len(sys.argv) - 1
+ip = args[0] if len(args) > 0 else "192.168.0.124"
+port = int(args[1]) if len(args) > 1 else 2121
 client_dir = os.path.join(os.path.dirname(__file__), "..", "client")
-pkgs = glob.glob(os.path.join(client_dir, "*.pkg"))
-if not pkgs:
-    sys.exit("No .pkg found: build first (wsl -d Debian -- bash tools/build.sh)")
-pkg = pkgs[0]
+title = "ALVR00001" if stable else "ALVR00002"
+pkg = os.path.join(client_dir, f"IV0000-{title}_00-ALVRPS4CLIENT000.pkg")
+if not os.path.exists(pkg):
+    sys.exit(f"{os.path.basename(pkg)} not found: build first (wsl -d Debian -- bash tools/build.sh"
+             + (" VARIANT=stable)" if stable else ")"))
 
 ftp = ftplib.FTP()
 ftp.connect(ip, port, timeout=30)

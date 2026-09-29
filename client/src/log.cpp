@@ -21,6 +21,9 @@ static unsigned g_seq = 0;
 
 void log_init()
 {
+#if !ALVR_PS4_DEV
+    return; // UDP logs only in the Dev build (make VARIANT=dev)
+#endif
     g_sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (g_sock >= 0) {
         int on = 1;

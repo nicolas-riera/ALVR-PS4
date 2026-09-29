@@ -50,10 +50,12 @@ Install SteamVR from Steam first. Then double-click **`ALVR-PS4-Setup.bat`** (fr
 Releases page) and accept the administrator prompt. It:
 
 1. closes the ALVR dashboard and SteamVR if they run;
-2. downloads ALVR streamer **20.14.1** into `alvr_streamer_windows\`, next to the .bat
-   (skipped if already there; any other ALVR driver registered with SteamVR is unregistered);
+2. downloads ALVR streamer **20.14.1** into `ALVR-PS4_PC-Streamer\`, next to the .bat
+   (skipped if already there; a folder named `alvr_streamer_windows` by an earlier setup is
+   renamed; any other ALVR driver registered with SteamVR is unregistered);
 3. patches its SteamVR driver (see "Driver patches" below; the download is checked by its
-   SHA-256 first, and the original is kept as `driver_alvr_server.dll.orig`);
+   SHA-256 first, and the original is kept as `driver_alvr_server.dll.orig`), and adds PSVR
+   and PS Move status icons for SteamVR (`resources\icons`);
 4. installs [VB-Audio Virtual Cable](https://vb-audio.com/Cable/) for the microphone,
    unless Virtual Audio Cable or VB-Cable is already installed;
 5. writes the PS4 settings (the table below) into ALVR's `session.json`, after backing up
@@ -64,18 +66,53 @@ Releases page) and accept the administrator prompt. It:
    dashboard.
 
 It is safe to run again. To install into another folder, run it from a command prompt:
-`ALVR-PS4-Setup.bat D:\VR`. The file is built from `pc-setup/setup.ps1` and
-`pc-setup/alvr-ps4-session.json` by `python tools/make_release.py`.
+`ALVR-PS4-Setup.bat D:\VR`. To start over from scratch, run
+`ALVR-PS4_PC-Streamer\ALVR-PS4-Reset.bat`: it deletes everything in that folder (ALVR, its
+settings, logs) and installs it again with the default PS4 settings (the PS4 then has to be
+trusted again). The file is built from `pc-setup/setup.ps1` and `pc-setup/alvr-ps4-session.json`
+by `python tools/make_release.py`.
+
+### Turning the virtual audio cable off
+
+The virtual audio cable adds a speaker and a microphone to Windows. To get rid of them when
+you do not need the PSVR microphone, run `ALVR-PS4_PC-Streamer\ALVR-PS4-Audio-Cable-Toggle.bat`:
+it disables the cable (VB-Cable or Virtual Audio Cable) and turns ALVR's microphone off (ALVR
+refuses to connect when its microphone device is missing). Run it again to enable both. It
+only changes anything when you run it; the setup and the reset keep the cable as it is.
+
+### Tracker mode (PS Moves with another headset)
+
+`ALVR-PS4_PC-Streamer\ALVR-PS4-Tracker-Mode.bat` switches between the normal mode and a
+tracker mode, for using the PS Moves as Vive trackers while wearing another SteamVR headset
+(run it again to switch back). In tracker mode:
+
+* the PSVR becomes a SteamVR tracking reference (ALVR's "tracking reference only"; nothing is
+  displayed in it), and the PS Moves become Vive trackers (right Move = right foot, left
+  Move = left foot; change the roles in SteamVR → Settings → Controllers → Manage Vive
+  Trackers);
+* all of them report their own tracking system, `PSMoves`: in
+  [OpenVR Space Calibrator](https://github.com/hyblocker/OpenVR-SpaceCalibrator), pick it as
+  the target space and calibrate with a PS Move held against one of the other headset's
+  controllers;
+* SteamVR's "Activate multiple drivers" setting is turned on, so that SteamVR loads ALVR
+  next to the other headset's driver.
+
+Keep ALVR PS4 running on the PS4 with the PSVR switched on, where the camera sees it. The
+play area centre is set where the PSVR is each time SteamVR connects: calibrate again after
+SteamVR restarts. The PS Move buttons do
+nothing in this mode. The reset .bat or the setup brings the normal mode back as well.
 
 ### Manual setup
 
 1. Extract [ALVR streamer 20.14.1](https://github.com/alvr-org/ALVR/releases/tag/v20.14.1)
    (`alvr_streamer_windows.zip`) and start **ALVR Dashboard.exe**. Follow its setup wizard,
    which registers the SteamVR driver and adds the firewall rules.
-2. Apply the driver patches: `python tools\alvr_driver_patch.py "C:\path\to\alvr_streamer_windows\bin\win64\driver_alvr_server.dll"`.
-3. Apply the PS4 settings: `python tools\alvr_setup.py --mic "C:\path\to\alvr_streamer_windows\session.json"`,
+2. Apply the driver patches: `python tools\alvr_driver_patch.py "C:\path\to\ALVR-PS4_PC-Streamer\bin\win64\driver_alvr_server.dll"`.
+3. Apply the PS4 settings: `python tools\alvr_setup.py --mic "C:\path\to\ALVR-PS4_PC-Streamer\session.json"`,
    or set them by hand (table below). The dashboard rewrites its settings while it runs,
    so the script waits until you close it. Leave out `--mic` without a virtual audio cable.
+4. Copy `pc-setup\icons` to `ALVR-PS4_PC-Streamer\resources\icons` (the PSVR and PS Move
+   status icons the settings refer to).
 
 ### Microphone
 
@@ -129,7 +166,7 @@ Button mappings: for `left` and `right`, each source maps to one destination wit
 
 ### Driver patches
 
-Two behaviours of the ALVR 20.14.1 SteamVR driver cannot be changed by any setting.
+Four behaviours of the ALVR 20.14.1 SteamVR driver cannot be changed by any setting.
 `tools/alvr_driver_patch.py` (and the automatic setup) patches `driver_alvr_server.dll`:
 
 * **Menu is not system.** The driver wires every controller's menu button to both the Vive
@@ -139,7 +176,18 @@ Two behaviours of the ALVR 20.14.1 SteamVR driver cannot be changed by any setti
 * **Headset "searching".** The driver always reports the headset as tracked. When the PS
   Camera has not seen the headset for 3 seconds, the PS4 client sends a marker height
   (below −500 m). The patched driver then reports the headset as out of range, and SteamVR
-  shows it as searching, with its grey screen. The PS4 lobby is not affected.
+  shows it as searching, with its grey screen. The same happens right away while the
+  headset tracking is not initialized yet (at start, or back from the PS menu).
+* **Controllers "searching".** The driver reports a controller either tracked or
+  disconnected, and drops its buttons while it is not tracked. A PS Move the camera has lost
+  for 10 seconds (or never seen) is sent with the same marker height: the patched driver
+  shows it as searching (hidden) and keeps its buttons working. A PS Move that is switched
+  off stays disconnected.
+* **Late controller activation.** When the PS4 connects, the driver gives SteamVR only 1
+  second to activate each controller. When SteamVR is busy (just started, many drivers,
+  another headset), the controllers then appeared in SteamVR but never moved nor received
+  any button until SteamVR was restarted. The patched driver keeps a controller that SteamVR
+  activates late, and it works as soon as it is activated.
 
 The script waits until SteamVR is closed, because the DLL is locked while it runs. It checks
 that the DLL really is 20.14.1 and keeps the original as `driver_alvr_server.dll.orig`.
@@ -189,8 +237,12 @@ mode by itself.
 The Moves vibrate with the game's haptics. In the lobby, they also tick on button presses
 while no PC is connected.
 
-**Recenter / fix drift:** open the PS4 menu (PS button), then go back to the app: the
-tracking is reset, as in PSVR games.
+**Play area centre:** each time SteamVR connects, the centre of the play area is placed
+where the headset is (direction and floor height unchanged). Afterwards, use SteamVR's own
+recenter (hold Start, the system button).
+
+**Fix drift:** open the PS4 menu (PS button), then go back to the app: the tracking is
+reset, as in PSVR games.
 
 **Tracking loss:** a Move hidden from the camera keeps its last position. SteamVR shows it
 as "searching" after 10 s. A headset the camera has lost is shown as "searching", with
@@ -238,8 +290,9 @@ OpenSSL 1.1 in `~/ps4/libssl11` (PkgTool needs it; Debian 13 no longer ships it)
 | `client/src/lobby.*` | software-rendered lobby |
 | `docs/alvr-20.14.1-protocol.md` | the ALVR 20.14.1 wire protocol, as implemented |
 | `tools/alvr_setup.py` | PC-side ALVR settings for this client |
-| `tools/alvr_driver_patch.py` | ALVR 20.14.1 driver patches: menu is not system, headset "searching" |
-| `pc-setup/` | sources of the one-file PC setup (`setup.ps1`, settings template) |
+| `tools/alvr_driver_patch.py` | ALVR 20.14.1 driver patches: menu is not system, headset and controllers "searching", late controller activation |
+| `pc-setup/` | sources of the one-file PC setup (`setup.ps1`, settings template, SteamVR icons) |
+| `tools/icons/make_icons.py` | draws the PSVR and PS Move SteamVR status icons (`pc-setup/icons`) |
 | `tools/make_release.py` | builds `release/` (`ALVR-PS4-v<version>.pkg`, `ALVR-PS4-Setup.bat`) for the GitHub release |
 | `tools/re/` | reverse-engineering helpers (headless Ghidra on dumped system modules) |
 
@@ -251,3 +304,11 @@ it over GoldHEN's FTP server, then restart the app:
 | `hostname` | random `NNNN.client` | the name the PS4 announces to ALVR |
 | `resolution_percent` | `130` | resolution per eye, in percent of the PSVR panel (960×1080), 50–160. The PS4 decoder slows down sharply above about 1920×1088 per frame (both eyes): with foveated encoding at the recommended settings, 130% decodes a 1920×1056 frame. Without foveated encoding, use 100 |
 | `controller_prediction_ms` | `0` | extra controller prediction on top of SteamVR's, 0–60 |
+| `user_height_cm` | `0` (not set) | your height, set in the lobby (first launch wizard, then settings); `0` shows the wizard at the next launch (a settings Reset also shows it at once) |
+| `camera_height_cm` | `0` (estimated) | height of the PS Camera above the floor, derived from your height |
+| `center_on_steamvr_start` | `1` | `1`: the play area centre is placed on the headset each time SteamVR connects; `0`: only once, at the first tracking |
+
+## Credits
+
+The PS Move status icon is drawn after the one of
+[PSMoveSteamVRBridge](https://github.com/HipsterSloth/PSMoveSteamVRBridge) (Apache License 2.0).

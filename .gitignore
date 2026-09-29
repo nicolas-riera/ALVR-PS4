@@ -14,3 +14,4 @@ tools/fontgen/*.ttf
 __pycache__/
 reference/alvr-20.14.1/
 release/
+client/sce_sys/icon0.png

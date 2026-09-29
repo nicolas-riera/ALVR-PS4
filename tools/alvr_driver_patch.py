@@ -20,10 +20,32 @@
                                                      poseIsValid = false; }
    SteamVR then shows the headset as searching, with its grey screen.
 
+3. Controller "searching" state.
+   Controller::OnPoseUpdate reports a controller the client sends as tracked, and one the
+   client omits as disconnected; Controller::SetButton drops every input while the last
+   pose is not valid. The PS4 client keeps sending a controller the camera has lost for
+   10 s, with a height below -500 m. The jmp ending the controllerMotion branch
+   (RVA 0xa75916) goes through a second check placed after the first one (RVA 0xae2d70):
+       if (motion.position.y < -500) { result = 201; poseIsValid = false; }
+   deviceIsConnected stays true, so SteamVR shows the controller as searching (hidden).
+   SetButton then tests last_pose.deviceIsConnected instead of poseIsValid
+   (RVA 0xa766aa: cmp byte [r14+0x12c] -> [r14+0x12f]), so its buttons keep working.
+   A controller switched off (omitted by the client) stays disconnected.
+
+4. Controllers registered even when SteamVR activates them late.
+   InitializeStreaming registers the controllers with TrackedDevice::register_device(true),
+   which waits only 1 s for SteamVR to call Activate. When SteamVR is busy (just started,
+   many drivers, another headset), the wait times out: the driver then drops its pointer to
+   the controller, SteamVR activates it anyway a moment later, and it never gets a pose or
+   an input until SteamVR restarts. The final test "activation_state == Success" becomes
+   "activation_state != Failure" (RVA 0xa6ee3f: cmp dword [rbx+0x13c], 1 / sete bl ->
+   cmp ..., 2 / setne bl), so a controller still pending is kept and works as soon as
+   SteamVR activates it (OnPoseUpdate and SetButton skip it until then).
+
 The original bytes are checked first and the DLL is backed up as
 driver_alvr_server.dll.orig. SteamVR locks the DLL, so this waits until vrserver.exe exits.
 
-Usage: python tools/alvr_driver_patch.py [path\\to\\driver_alvr_server.dll] [--undo]
+Usage: python tools/alvr_driver_patch.py <path\\to\\driver_alvr_server.dll> [--undo]
 """
 import os
 import shutil
@@ -33,7 +55,9 @@ import sys
 import time
 
 args = [a for a in sys.argv[1:] if not a.startswith("--")]
-DLL = args[0] if args else r"C:\Users\habbo\Downloads\alvr_streamer_windows\bin\win64\driver_alvr_server.dll"
+if not args:
+    sys.exit(__doc__)
+DLL = args[0]
 UNDO = "--undo" in sys.argv
 
 SYSTEM_CLICK_RVA = 0xBB2C38    # "/input/system/click", to recognise the 20.14.1 DLL
@@ -52,6 +76,21 @@ CAVE = bytes.fromhex(
     "c684247c01000000"         # mov byte [rsp+0x17c], 0       (poseIsValid = false)
     "c3"                       # done: ret
 )
+CTRL_JMP_RVA = 0xA75916       # jmp 0xa75ba3, end of the controllerMotion branch
+CTRL_TARGET_RVA = 0xA75BA3
+CTRL_CAVE_RVA = 0xAE2D70       # after the headset check
+SETBUTTON_RVA = 0xA766AA       # cmp byte [r14+0x12c], 0 (last_pose.poseIsValid)
+ACTIVATION_RVA = 0xA6EE3F      # register_device: cmp dword [rbx+0x13c], 1 (activation_state)
+
+CTRL_CAVE = bytes.fromhex(
+    "418b461c"                 # mov eax, [r14+0x1c]           (FfiDeviceMotion.position.y)
+    "3d0000fac3"               # cmp eax, 0xc3fa0000           (-500.0f)
+    "760b"                     # jbe back
+    "c74550c9000000"           # mov dword [rbp+0x50], 201     (result = Running_OutOfRange)
+    "c6455400"                 # mov byte [rbp+0x54], 0        (poseIsValid = false)
+)
+CTRL_CAVE += b"\xe9" + struct.pack("<i", CTRL_TARGET_RVA - (CTRL_CAVE_RVA + len(CTRL_CAVE) + 5))
+
 CALL_CAVE = b"\xe8" + struct.pack("<i", CAVE_RVA - (HMD_RESULT_RVA + 5)) + bytes.fromhex("660f1f440000")
 
 # (where, original bytes, patched bytes); where = RVA, or ("text_vsize",) for the header
@@ -61,6 +100,10 @@ PATCHES = [
     (CAVE_RVA, bytes(len(CAVE)), CAVE),
     (HMD_RESULT_RVA, bytes.fromhex("c7842470010000c8000000"), CALL_CAVE),
     (("text_vsize",), struct.pack("<I", TEXT_VSIZE_ORIG), struct.pack("<I", TEXT_VSIZE_NEW)),
+    (CTRL_CAVE_RVA, bytes(len(CTRL_CAVE)), CTRL_CAVE),
+    (CTRL_JMP_RVA, bytes.fromhex("e988020000"), b"\xe9" + struct.pack("<i", CTRL_CAVE_RVA - (CTRL_JMP_RVA + 5))),
+    (SETBUTTON_RVA, bytes.fromhex("4180be2c01000000"), bytes.fromhex("4180be2f01000000")),
+    (ACTIVATION_RVA, bytes.fromhex("83bb3c01000001488bcf0f94c3"), bytes.fromhex("83bb3c01000002488bcf0f95c3")),
 ]
 
 

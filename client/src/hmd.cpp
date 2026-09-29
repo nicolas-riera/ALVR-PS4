@@ -15,6 +15,8 @@ static PFN_sceHmdInitialize p_initialize;
 static PFN_sceHmdGetDeviceInformation p_get_device_information;
 static PFN_sceHmdOpen p_open;
 static PFN_sceHmdGetFieldOfView p_get_field_of_view;
+static int (*p_get_device_information_by_handle)(int32_t handle, HmdDeviceInformation *info);
+static int (*p_close)(int32_t handle);
 
 static_assert(sizeof(HmdDeviceInformation) == 0x20, "HmdDeviceInformation layout");
 
@@ -48,14 +50,15 @@ int hmd_refresh(HmdState *st)
     return rc;
 }
 
-bool hmd_start(int module, int user_id, HmdState *st)
+bool hmd_init(int module, HmdState *st)
 {
     memset(st, 0, sizeof(*st));
     if (module < 0)
         return false;
     if (!resolve(module, "sceHmdInitialize", (void **)&p_initialize) ||
         !resolve(module, "sceHmdGetDeviceInformation", (void **)&p_get_device_information) ||
-        !resolve(module, "sceHmdOpen", (void **)&p_open) ||
+        !resolve(module, "sceHmdGetDeviceInformationByHandle", (void **)&p_get_device_information_by_handle) ||
+        !resolve(module, "sceHmdOpen", (void **)&p_open) || !resolve(module, "sceHmdClose", (void **)&p_close) ||
         !resolve(module, "sceHmdGetFieldOfView", (void **)&p_get_field_of_view))
         return false;
 
@@ -66,7 +69,13 @@ bool hmd_start(int module, int user_id, HmdState *st)
     if (rc < 0 && (unsigned)rc != 0x81110001 /* already initialized */)
         return false;
     st->initialized = true;
+    return true;
+}
 
+bool hmd_open(int user_id, HmdState *st)
+{
+    if (!st->initialized)
+        return false;
     if (hmd_refresh(st) == 0) {
         LOG("HMD status=%s user=0x%x panel=%ux%u latency90=%u latency120=%u hmu_mount=%u",
             hmd_status_name(st->info.status), st->info.user_id, st->info.panel_width,
@@ -74,7 +83,7 @@ bool hmd_start(int module, int user_id, HmdState *st)
             st->info.flip_to_display_latency_120hz, st->info.hmu_mount);
     }
 
-    rc = p_open(user_id, 0, 0, nullptr);
+    int rc = p_open(user_id, 0, 0, nullptr);
     LOG("sceHmdOpen(user=0x%x) -> 0x%08x", user_id, (unsigned)rc);
     if (rc < 0)
         return false;
@@ -84,6 +93,31 @@ bool hmd_start(int module, int user_id, HmdState *st)
     LOG("sceHmdGetFieldOfView -> 0x%08x  tan out=%.4f in=%.4f top=%.4f bottom=%.4f", (unsigned)rc,
         st->fov.tan_out, st->fov.tan_in, st->fov.tan_top, st->fov.tan_bottom);
     return true;
+}
+
+bool hmd_handle_valid(HmdState *st)
+{
+    if (st->handle <= 0)
+        return false;
+    HmdDeviceInformation info;
+    memset(&info, 0, sizeof(info));
+    int rc = p_get_device_information_by_handle(st->handle, &info);
+    if (rc < 0)
+        LOG("sceHmdGetDeviceInformationByHandle(0x%x) -> 0x%08x", st->handle, (unsigned)rc);
+    return (unsigned)rc != 0x81110003; // HANDLE_INVALID: the headset was power cycled or replugged
+}
+
+bool hmd_reopen(int user_id, HmdState *st)
+{
+    if (st->handle > 0) {
+        LOG("sceHmdClose(0x%x) -> 0x%08x", st->handle, (unsigned)p_close(st->handle));
+        st->handle = 0;
+    }
+    HmdFieldOfView fov = st->fov;
+    bool ok = hmd_open(user_id, st);
+    if (!ok)
+        st->fov = fov;
+    return ok;
 }
 
 void hmd_stop(int module, HmdState *st)

@@ -1,6 +1,6 @@
 #pragma once
 
-// Logging: every line goes to stdout, to a UDP broadcast on the LAN
+// Logging: every line goes to stdout, to a UDP broadcast on the LAN (Dev build only)
 // (received on the PC by tools/log_receiver.py), and to an in-memory ring
 // buffer that the on-screen console draws.
 
