@@ -121,7 +121,10 @@ static const int QUEUE_SLOTS = 8;
 static const int MAX_QUEUED = 4;
 static const size_t CONFIG_MAX = 1024;       // SPS/PPS, prepended to IDR frames in place
 static const size_t SLOT_SIZE = 3 << 20;     // largest access unit accepted (+ CONFIG_MAX)
-static const int EYE_SETS = 4;               // published, displayed, previously displayed, writing
+// Converted frames wait in a small FIFO for the display (READY_MAX), then are displayed; the
+// previously displayed set may still be read by the compositor pass in progress.
+static const int READY_MAX = 3;
+static const int EYE_SETS = READY_MAX + 3;   // ready, displayed, previously displayed, writing
 // Decoder pipeline depth: a Decode call returns the picture of the access unit given
 // depth - 1 calls before, and blocks until it is ready. A picture takes ~20 ms from its
 // access unit to being ready, although the hardware finishes one every 7-10 ms: at 1 every
@@ -186,9 +189,18 @@ static uint32_t *g_eye_mem[EYE_SETS][2];
 static GnmTexture g_eye_tex[EYE_SETS][2];
 static uint32_t g_eye_w, g_eye_h, g_eye_pitch;
 static pthread_mutex_t g_pub_lock = PTHREAD_MUTEX_INITIALIZER;
-static int g_published = -1, g_displayed = -1, g_prev_displayed = -1;
-static uint64_t g_pub_ts, g_pub_decoded_us;
+struct Ready {
+    int set;
+    uint64_t timestamp_ns, decoded_us;
+};
+static Ready g_ready[READY_MAX]; // oldest first
+static int g_ready_count;
+static bool g_stream_valid;      // a frame was published since the last reset
+static int g_displayed = -1, g_prev_displayed = -1;
+static uint64_t g_disp_ts, g_disp_decoded_us;
+static unsigned g_disp_seq;      // increments with every frame taken for display
 static unsigned g_pub_seq;
+static unsigned g_ready_overflow, g_ready_trimmed; // frames never displayed (FIFO full / trimmed)
 static unsigned g_bench_pub_seq; // g_pub_seq when the bench began
 static uint64_t g_bench_bytes;   // access unit bytes queued during the bench
 
@@ -878,6 +890,15 @@ static void decode_one(Slot &s, const uint8_t *config, size_t config_len)
     pthread_mutex_unlock(&g_lock);
     if (!out.is_valid)
         return;
+    // The picture is expected in the frame buffer given to this call.
+    if (out.frame_buffer != g_frame_buffers[fb_index]) {
+        static unsigned mismatch_logged;
+        if (mismatch_logged++ < 20)
+            LOG("video: picture in frame buffer %p, %p was given", out.frame_buffer, g_frame_buffers[fb_index]);
+        for (int i = 0; i < FRAME_BUFFERS; i++)
+            if (out.frame_buffer == g_frame_buffers[i])
+                fb_index = i;
+    }
     uint64_t ts = s.timestamp_ns, rx = s.received_us;
     if (g_ts_count > 0) {
         ts = g_ts_fifo[g_ts_head];
@@ -940,9 +961,13 @@ static void *convert_main_thread(void *)
         if (alloc_eye_buffers(eye_w, eye_h)) {
             int w;
             pthread_mutex_lock(&g_pub_lock);
-            for (w = 0; w < EYE_SETS; w++)
-                if (w != g_published && w != g_displayed && w != g_prev_displayed)
+            for (w = 0; w < EYE_SETS; w++) {
+                bool used = w == g_displayed || w == g_prev_displayed;
+                for (int i = 0; i < g_ready_count; i++)
+                    used = used || g_ready[i].set == w;
+                if (!used)
                     break;
+            }
             pthread_mutex_unlock(&g_pub_lock);
             const uint8_t *y = (const uint8_t *)g_frame_buffers[d.fb];
             const uint8_t *uv = y + (size_t)d.pitch * d.height;
@@ -983,9 +1008,13 @@ static void *convert_main_thread(void *)
                 bench_record(&g_bench.latency, t1 - d.received_us);
 
             pthread_mutex_lock(&g_pub_lock);
-            g_published = w;
-            g_pub_ts = d.timestamp_ns;
-            g_pub_decoded_us = t1;
+            if (g_ready_count == READY_MAX) { // the display is behind: the oldest is never shown
+                memmove(&g_ready[0], &g_ready[1], sizeof(Ready) * (READY_MAX - 1));
+                g_ready_count--;
+                g_ready_overflow++;
+            }
+            g_ready[g_ready_count++] = Ready{w, d.timestamp_ns, t1};
+            g_stream_valid = true;
             g_pub_seq++;
             pthread_mutex_unlock(&g_pub_lock);
             pthread_mutex_lock(&g_lock);
@@ -1276,27 +1305,61 @@ void video_reset()
     g_codec = 0xffffffff;
     pthread_mutex_unlock(&g_lock);
     pthread_mutex_lock(&g_pub_lock);
-    g_published = -1;
+    g_stream_valid = false;
+    g_ready_count = 0;
     pthread_mutex_unlock(&g_pub_lock);
 }
 
-bool video_latest(VideoFrame *out)
+bool video_next(VideoFrame *out, bool take, int keep)
 {
     pthread_mutex_lock(&g_pub_lock);
-    if (g_published >= 0 && g_published != g_displayed) {
+    if (take && g_ready_count > 0) {
+        // More waiting than the display needs: after a burst (frames delayed on the PC or
+        // the network, then arriving together) the extra reserve is kept for a while, it
+        // absorbs the next delay; only a surplus that lasts 1 s (the PC runs slightly
+        // faster than the headset) skips the oldest.
+        static uint64_t surplus_since;
+        const uint64_t t = now_us();
+        if (g_ready_count <= keep + 1)
+            surplus_since = 0;
+        else if (!surplus_since)
+            surplus_since = t;
+        if (surplus_since && t - surplus_since >= 1000000) {
+            while (g_ready_count > keep + 1) {
+                memmove(&g_ready[0], &g_ready[1], sizeof(Ready) * (READY_MAX - 1));
+                g_ready_count--;
+                g_ready_trimmed++;
+            }
+            surplus_since = 0;
+        }
+        const Ready r = g_ready[0];
+        memmove(&g_ready[0], &g_ready[1], sizeof(Ready) * (READY_MAX - 1));
+        g_ready_count--;
         g_prev_displayed = g_displayed;
-        g_displayed = g_published;
+        g_displayed = r.set;
+        g_disp_ts = r.timestamp_ns;
+        g_disp_decoded_us = r.decoded_us;
+        g_disp_seq++;
     }
-    bool ok = g_displayed >= 0 && g_published >= 0;
+    bool ok = g_stream_valid && g_displayed >= 0;
     if (ok) {
         out->eye[0] = &g_eye_tex[g_displayed][0];
         out->eye[1] = &g_eye_tex[g_displayed][1];
-        out->timestamp_ns = g_pub_ts;
-        out->decoded_us = g_pub_decoded_us;
-        out->seq = g_pub_seq;
+        out->timestamp_ns = g_disp_ts;
+        out->decoded_us = g_disp_decoded_us;
+        out->seq = g_disp_seq;
+        out->waiting = g_ready_count;
     }
     pthread_mutex_unlock(&g_pub_lock);
     return ok;
+}
+
+void video_pacing_stats(unsigned *overflow, unsigned *trimmed)
+{
+    pthread_mutex_lock(&g_pub_lock);
+    *overflow = g_ready_overflow;
+    *trimmed = g_ready_trimmed;
+    pthread_mutex_unlock(&g_pub_lock);
 }
 
 void video_get_stats(VideoStats *out)
@@ -1307,12 +1370,20 @@ void video_get_stats(VideoStats *out)
     pthread_mutex_unlock(&g_lock);
 }
 
+unsigned video_published_seq()
+{
+    pthread_mutex_lock(&g_pub_lock);
+    unsigned s = g_pub_seq;
+    pthread_mutex_unlock(&g_pub_lock);
+    return s;
+}
+
 bool video_wait_new(unsigned after_seq, uint32_t timeout_us)
 {
     uint64_t end = now_us() + timeout_us;
     for (;;) {
         pthread_mutex_lock(&g_pub_lock);
-        bool fresh = g_published >= 0 && g_pub_seq != after_seq;
+        bool fresh = g_stream_valid && g_pub_seq != after_seq;
         pthread_mutex_unlock(&g_pub_lock);
         if (fresh)
             return true;

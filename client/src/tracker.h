@@ -26,6 +26,14 @@ struct TrackerState {
     TrackerPose eye_pose[2]; // left, right (from the HMD result, includes the system IPD)
     TrackerPose head_pose;
     uint64_t timestamp;
+    // The same with the position predicted g_tracker_head_prediction_us ahead (equal to
+    // the above when 0): the pose sent to SteamVR while streaming.
+    TrackerPose predicted_device_pose;
+    TrackerPose predicted_eye_pose[2];
+    uint64_t predicted_timestamp;
+    float velocity[3];    // smoothed headset velocity, m/s, tracker space
+    uint64_t velocity_ts; // tracker timestamp of the last velocity sample
+    float head_lead_m;    // how far the prediction moves the position
     uint64_t last_seen_us; // last time the camera saw the headset
     unsigned results_ok;
 };
@@ -64,6 +72,9 @@ struct TrackedDevice {
 // How far ahead of "now" the controller poses are predicted (us). Set by the render loop
 // from the measured motion-to-photon latency of the video stream; 0 in the lobby.
 extern volatile uint32_t g_tracker_controller_prediction_us;
+// How far ahead the headset pose sent to SteamVR is predicted (us): the measured
+// motion-to-photon latency while streaming, 0 in the lobby.
+extern volatile uint32_t g_tracker_head_prediction_us;
 
 // Time without camera view after which a device is reported as "searching".
 #define TRACKER_CONTROLLER_SEARCHING_US 10000000ull

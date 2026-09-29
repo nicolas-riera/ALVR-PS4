@@ -1,8 +1,10 @@
 #pragma once
 
-// Persistent client settings, stored in /data/alvr-ps4/config.txt.
+// Persistent client settings, kept in the PS4 save data of the user who started the app.
 
 #define ALVR_STREAMER_VERSION "20.14.1"
+// Headset prediction by default, in percent of the stream latency (100 overshot on hardware).
+#define CONFIG_DEFAULT_HEAD_PREDICTION 40
 
 struct ClientConfig {
     char hostname[64]; // ALVR client hostname, "NNNN.client" like the official client
@@ -13,6 +15,9 @@ struct ClientConfig {
     int resolution_percent;
     // Extra controller prediction on top of SteamVR's own (which uses the velocities).
     int controller_prediction_ms;
+    // Headset position sent to SteamVR predicted over this share of the stream latency
+    // (0-100 %; 0 = the current position, as up to 0.9.3).
+    int head_prediction_percent;
     // Height of the PS Camera above the floor, derived from the user's height in the lobby
     // settings. 0 = not set yet: the floor is guessed from the first headset position.
     int camera_height_cm;
@@ -28,5 +33,7 @@ struct ClientConfig {
     int refresh_rate;
 };
 
-void config_load(ClientConfig *cfg);
+// Reads the settings from the save data (defaults when there is none yet).
+void config_load(ClientConfig *cfg, int user_id);
+// Saves them in the background (after config_load).
 void config_store(const ClientConfig *cfg);

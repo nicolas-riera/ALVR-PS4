@@ -220,7 +220,8 @@ def plans(fps):
     pipeline = [t(f"depth {d}", depth=d) for d in (1, 2, 3, 4)] + [t(f"{j} jobs", jobs=j) for j in (2, 4, 6, 8)]
     quick = [t("ALVR recording as it is", raw=True), t("80 Mbps (current)"), t("60 Mbps", mbps=60),
              t("120 Mbps", mbps=120), t("max speed 60 Mbps", fps=0), size[2], encoder[0]]
-    return {"quick": quick, "bitrate": bitrate + throughput, "encoder": encoder, "size": size,
+    pacing = [t("80 Mbps (current)")]  # one test: watch the "pacing" figures of the PS4 log
+    return {"quick": quick, "pacing": pacing, "bitrate": bitrate + throughput, "encoder": encoder, "size": size,
             "pipeline": pipeline, "full": bitrate + throughput + encoder + size + pipeline}
 
 

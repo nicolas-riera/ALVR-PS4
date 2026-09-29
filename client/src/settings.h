@@ -9,7 +9,7 @@
 // Lobby settings panel: opened with START (PS Move) or OPTIONS (DualShock 4), placed in
 // front of the head (towards the camera, whatever the head orientation), driven by a
 // laser from each PS Move (clicked with the trigger) and from the DualShock 4 (clicked
-// with Cross). Changes go to /data/alvr-ps4/config.txt.
+// with Cross). Changes go to the save data (config.cpp).
 
 // Height shown until the user sets theirs; the floor is estimated at its eye height
 // below the headset until then, so the grid matches the value shown.

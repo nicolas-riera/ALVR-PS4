@@ -3,7 +3,7 @@
 #   make VARIANT=stable   -> build the stable .pkg (releases only)
 #   make clean
 
-VERSION     := 01.43
+VERSION     := 01.44
 VARIANT     ?= dev
 
 ifeq ($(VARIANT),stable)
@@ -31,7 +31,7 @@ ATTRIBUTE   := 0x04004000
 # zeroes the 2D VR screen size/distance for SDK < 4.50; use Beat Saber's (5.50).
 SDK_VERSION := 0x05508001
 
-LIBS        := -lc -lkernel -lc++ -lSceVideoOut -lSceNetCtl -lSceSysmodule -lSceUserService -lSceSystemService -lSceGnmDriver -lScePad
+LIBS        := -lc -lkernel -lc++ -lSceVideoOut -lSceNetCtl -lSceSysmodule -lSceUserService -lSceSystemService -lSceGnmDriver -lScePad -lSceSaveData
 
 TOOLCHAIN   ?= $(OO_PS4_TOOLCHAIN)
 BIN         := $(TOOLCHAIN)/bin/linux
@@ -64,10 +64,14 @@ $(VARIANT_STAMP):
 sce_sys/icon0.png: $(ICON) $(VARIANT_STAMP)
 	cp $(ICON) $@
 
+# Icon of the settings save (copied into the save when it is created).
+sce_sys/save_data.png: icons/save_data.png
+	cp $< $@
+
 $(CONTENT_ID).pkg: pkg.gp4
 	$(BIN)/PkgTool.Core pkg_build $< .
 
-pkg.gp4: eboot.bin sce_sys/about/right.sprx sce_sys/param.sfo sce_sys/icon0.png $(LIBMODULES) $(ASSETS)
+pkg.gp4: eboot.bin sce_sys/about/right.sprx sce_sys/param.sfo sce_sys/icon0.png sce_sys/save_data.png $(LIBMODULES) $(ASSETS)
 	$(BIN)/create-gp4 -out $@ --content-id=$(CONTENT_ID) --files "$^"
 
 sce_sys/param.sfo: Makefile $(VARIANT_STAMP)
@@ -78,6 +82,10 @@ sce_sys/param.sfo: Makefile $(VARIANT_STAMP)
 	$(BIN)/PkgTool.Core sfo_setentry $@ CATEGORY --type Utf8 --maxsize 4 --value 'gd'
 	$(BIN)/PkgTool.Core sfo_setentry $@ CONTENT_ID --type Utf8 --maxsize 48 --value '$(CONTENT_ID)'
 	$(BIN)/PkgTool.Core sfo_setentry $@ DOWNLOAD_DATA_SIZE --type Integer --maxsize 4 --value 0
+ifneq ($(TITLE_ID),ALVR00001)
+	# The Dev app uses the stable app's save data (same settings and hostname).
+	$(BIN)/PkgTool.Core sfo_setentry $@ INSTALL_DIR_SAVEDATA --type Utf8 --maxsize 16 --value 'ALVR00001'
+endif
 	$(BIN)/PkgTool.Core sfo_setentry $@ SYSTEM_VER --type Integer --maxsize 4 --value 0
 	$(BIN)/PkgTool.Core sfo_setentry $@ TITLE --type Utf8 --maxsize 128 --value '$(TITLE)'
 	$(BIN)/PkgTool.Core sfo_setentry $@ TITLE_ID --type Utf8 --maxsize 12 --value '$(TITLE_ID)'
@@ -92,6 +100,6 @@ $(BUILD)/%.o: src/%.cpp $(wildcard src/*.h) $(VARIANT_STAMP) Makefile
 	$(CXX) $(CXXFLAGS) -c -o $@ $<
 
 clean:
-	rm -rf $(BUILD) eboot.bin pkg.gp4 sce_sys/param.sfo sce_sys/icon0.png *.pkg
+	rm -rf $(BUILD) eboot.bin pkg.gp4 sce_sys/param.sfo sce_sys/icon0.png sce_sys/save_data.png *.pkg
 
 .PHONY: all clean

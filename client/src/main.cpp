@@ -36,7 +36,7 @@
 #include "video.h"
 #include "bench.h"
 
-#define ALVR_PS4_VERSION "0.9.3"
+#define ALVR_PS4_VERSION "0.10.0"
 #if ALVR_PS4_DEV
 #define ALVR_PS4_TITLE "ALVR PS4 (Dev)"
 #else
@@ -295,11 +295,11 @@ static unsigned g_sent_pose_next;
 
 static void remember_sent_pose(uint64_t timestamp_ns)
 {
-    const TrackerPose &tp = g_tracker.device_pose;
+    const TrackerPose &tp = g_tracker.predicted_device_pose; // what SteamVR renders with
     SentPose &s = g_sent_poses[g_sent_pose_next++ % 256];
     memset(&s, 0, sizeof(s));
     s.timestamp_ns = timestamp_ns;
-    s.pose.timestamp = g_tracker.timestamp;
+    s.pose.timestamp = g_tracker.predicted_timestamp;
     s.pose.orientation[0] = tp.qx;
     s.pose.orientation[1] = tp.qy;
     s.pose.orientation[2] = tp.qz;
@@ -329,10 +329,12 @@ static bool find_sent_pose(uint64_t timestamp_ns, ReprojPose *out)
 }
 
 // Head for SteamVR and the lobby: centre between the eyes, orientation of the headset
-// (device pose if the eye poses are not filled). Tracker space.
-static void head_pose(float p[3], float q[4])
+// (device pose if the eye poses are not filled). Tracker space. `predicted`: the pose
+// predicted over the stream latency, for SteamVR.
+static void head_pose(float p[3], float q[4], bool predicted = false)
 {
-    const TrackerPose &l = g_tracker.eye_pose[0], &r = g_tracker.eye_pose[1], &d = g_tracker.device_pose;
+    const TrackerPose *e = predicted ? g_tracker.predicted_eye_pose : g_tracker.eye_pose;
+    const TrackerPose &l = e[0], &r = e[1], &d = predicted ? g_tracker.predicted_device_pose : g_tracker.device_pose;
     bool eyes = l.qw * l.qw + l.qx * l.qx + l.qy * l.qy + l.qz * l.qz > 0.5f;
     p[0] = eyes ? (l.px + r.px) * 0.5f : d.px;
     p[1] = eyes ? (l.py + r.py) * 0.5f : d.py;
@@ -402,18 +404,66 @@ static void update_tracking_state(bool streaming)
 }
 
 static unsigned g_video_shown_seq; // last video frame handed to the compositor
+// Frame pacing on the compositor's pass event (false: not available, frames are shown as
+// soon as they are converted, as up to 0.9.3).
+static bool g_paced;
+static uint64_t g_m2p_avg_us;      // motion-to-photon of the stream, averaged
+// Latency the headset prediction is based on, at most: m2p is 55-65 ms while streaming,
+// but climbs to 300 ms while SteamVR resends old frames (loading, paused).
+static const uint64_t HEAD_PREDICTION_LATENCY_MAX_US = 70000;
 
 // Streamed frame: shown through the compositor with the pose it was rendered for.
 // Returns false (lobby shown instead) until frames arrive, or after 1.5 s without one.
 static bool render_video()
 {
+    // Paced: one frame per stream frame period of the display (every refresh at 90 Hz, every
+    // other at 120 Hz), taken in order from the frames waiting, with one kept in reserve.
+    // Shown as soon as converted instead, frames reached the compositor at irregular points
+    // of its cycle (network, decoding and conversion times vary by a few ms, and the PC
+    // runs at 90.00 fps against the headset's 89.91 Hz): at 90 Hz one frame in the 11.1 ms
+    // window often came a pass late and the next one replaced it, a constant judder in the
+    // headset (worse on a base PS4). The reserve absorbs that variation, at the cost of up
+    // to one frame of latency; one frame is skipped every ~11 s for the rate difference.
+    static unsigned tick;
+    const unsigned per_frame = g_display_hz == 90 ? 1 : 2;
+    const bool take = !g_paced || ++tick % per_frame == 0;
     VideoFrame vf;
-    if (!video_latest(&vf) || sceKernelGetProcessTime() - vf.decoded_us > 1500000) {
+    if (!video_next(&vf, take, g_paced ? 1 : 0) || sceKernelGetProcessTime() - vf.decoded_us > 1500000) {
         g_tracker_controller_prediction_us = 0; // lobby: show the Moves where they are
+        g_tracker_head_prediction_us = 0;
+        g_m2p_avg_us = 0;
         return false;
     }
+    // Frames out of line (hardware report: now and then, mostly while turning, the headset
+    // shows for one frame what looks like the picture of 3-4 frames before): a pose not
+    // found, a tracking timestamp older than the previous frame's, or much older than usual.
+    static unsigned pose_misses, backwards, stale, anomaly_logs;
+    static uint64_t prev_ts;
+    const bool fresh_frame = vf.seq != g_video_shown_seq;
     ReprojPose pose;
-    if (!find_sent_pose(vf.timestamp_ns, &pose)) {
+    const bool pose_found = find_sent_pose(vf.timestamp_ns, &pose);
+    if (fresh_frame) {
+        const uint64_t now_a = sceKernelGetProcessTime(), sample_us = vf.timestamp_ns / 1000;
+        const int64_t step_ms = ((int64_t)vf.timestamp_ns - (int64_t)prev_ts) / 1000000;
+        const int64_t age_ms = sample_us ? ((int64_t)now_a - (int64_t)sample_us) / 1000 : -1;
+        const char *what = !pose_found                                      ? "pose not found"
+                           : prev_ts && vf.timestamp_ns < prev_ts            ? "tracking timestamp went back"
+                           : g_m2p_avg_us && age_ms * 1000 > (int64_t)g_m2p_avg_us + 30000 ? "old tracking timestamp"
+                                                                             : nullptr;
+        if (!pose_found)
+            pose_misses++;
+        else if (prev_ts && vf.timestamp_ns < prev_ts)
+            backwards++;
+        else if (what)
+            stale++;
+        if (what && anomaly_logs < 60) {
+            anomaly_logs++;
+            LOG("video: frame %u %s: %lld ms after the previous frame's, %lld ms old (m2p %.0f ms), %d waiting",
+                vf.seq, what, (long long)step_ms, (long long)age_ms, g_m2p_avg_us / 1000.0, vf.waiting);
+        }
+        prev_ts = vf.timestamp_ns;
+    }
+    if (!pose_found) {
         // Unknown timestamp (0 = the streamer found no match): current pose, no warp.
         const TrackerPose &tp = g_tracker.device_pose;
         memset(&pose, 0, sizeof(pose));
@@ -434,13 +484,19 @@ static bool render_video()
     static uint64_t stat_start;
     static unsigned shown;
     unsigned &last_seq = g_video_shown_seq;
+    const bool fresh = vf.seq != last_seq;
     // Motion-to-photon: from the tracking sample a frame was rendered with to its display
-    // (next compositor vsync, about one refresh period after submission). Logged only: predicting all of it
-    // on top of SteamVR's own extrapolation (2.1 frames, with the velocities) was too
-    // much. The optional extra prediction comes from config.txt.
-    static uint64_t m2p_avg_us;
+    // (next compositor vsync, about one refresh period after submission). The headset pose
+    // sent to SteamVR is predicted over it. The controllers are not: SteamVR extrapolates
+    // them itself with their velocities, and predicting all of it on top was too much; the
+    // optional extra prediction comes from the settings.
+    uint64_t &m2p_avg_us = g_m2p_avg_us;
     uint64_t now = sceKernelGetProcessTime();
     g_tracker_controller_prediction_us = (uint32_t)g_config.controller_prediction_ms * 1000;
+    // The headset position is predicted over the share of it set in the settings: 40 % by
+    // default (hardware test: 100 % overshot, the view went past the head and came back).
+    const uint64_t latency_us = m2p_avg_us < HEAD_PREDICTION_LATENCY_MAX_US ? m2p_avg_us : HEAD_PREDICTION_LATENCY_MAX_US;
+    g_tracker_head_prediction_us = (uint32_t)(latency_us * (uint64_t)g_config.head_prediction_percent / 100);
     if (vf.seq != last_seq) {
         shown++;
         last_seq = vf.seq;
@@ -451,18 +507,42 @@ static bool render_video()
             m2p_avg_us = m2p_avg_us ? (m2p_avg_us * 31 + m2p) / 32 : m2p;
         }
     }
+    // Display frames without a new frame to show although the stream runs (the reserve was
+    // empty), and the FIFO level seen.
+    static unsigned repeats, takes, waiting_sum;
+    if (take && !fresh)
+        repeats++;
+    if (take) {
+        takes++;
+        waiting_sum += vf.waiting;
+    }
+    // How far the prediction moved the headset (largest over the report period).
+    static float lead_max_cm;
+    if (g_tracker.head_lead_m * 100.0f > lead_max_cm)
+        lead_max_cm = g_tracker.head_lead_m * 100.0f;
     if (!stat_start)
         stat_start = now;
     if (now - stat_start >= 5000000) {
         VideoStats vs;
         video_get_stats(&vs);
+        static unsigned last_overflow, last_trimmed;
+        unsigned overflow, trimmed;
+        video_pacing_stats(&overflow, &trimmed);
         LOG("video: %.1f fps, rx %u dec %u drop %u lost %u err %u, decode %.1f ms (cpu %.1f), %.0f KB/frame, convert %.1f ms, "
-            "queue %u, m2p %.0f ms",
+            "queue %u, m2p %.0f ms, head predicted %.0f ms (up to %.1f cm), pacing %s: repeat %u skip %u wait %.2f, "
+            "pose miss %u back %u old %u",
             shown * 1e6 / (double)(now - stat_start), vs.received, vs.decoded, vs.dropped, vs.lost, vs.errors,
             vs.decode_us_avg / 1000.0, vs.decode_cpu_us_avg / 1000.0, vs.bytes_avg / 1024.0, vs.convert_us_avg / 1000.0,
-            vs.queue_max, m2p_avg_us / 1000.0);
+            vs.queue_max, m2p_avg_us / 1000.0, g_tracker_head_prediction_us / 1000.0, lead_max_cm,
+            g_paced ? "on" : "off", repeats, (overflow - last_overflow) + (trimmed - last_trimmed),
+            takes ? (double)waiting_sum / takes : 0.0, pose_misses, backwards, stale);
+        pose_misses = backwards = stale = 0;
         stat_start = now;
         shown = 0;
+        lead_max_cm = 0;
+        repeats = takes = waiting_sum = 0;
+        last_overflow = overflow;
+        last_trimmed = trimmed;
     }
     return ok;
 }
@@ -792,9 +872,13 @@ static void to_stage(const float p[3], const float q[4], AlvrDeviceMotion *m)
 static void send_alvr_uplink()
 {
     AlvrDeviceMotion head, hands[2];
-    // Head: centre between the eyes, orientation of the headset (always sent).
+    // Head: centre between the eyes, orientation of the headset (always sent), its position
+    // predicted to the time the frame rendered with it is shown, as the official client
+    // does: SteamVR does not extrapolate the headset (ALVR sends it no velocity), so the
+    // current position made the view lag the head by the whole stream latency (40-70 ms;
+    // "jelly" position; the PS4 reprojection corrects only the rotation).
     float hp[3], hq[4];
-    head_pose(hp, hq);
+    head_pose(hp, hq, true);
     to_stage(hp, hq, &head);
     const uint64_t now = sceKernelGetProcessTime();
     // Headset tracking not initialized yet (start, back from the PS menu): searching right
@@ -863,7 +947,6 @@ static void draw_status(Screen *s, const char *status)
 // it gets 1 s before the dialog is asked for.
 static void wait_for_headset(Screen *s)
 {
-    init_user();
     if (!hmd_init(g_probes[0].handle, &g_hmd)) {
         LOG("libSceHmd unavailable");
         return;
@@ -1014,7 +1097,8 @@ int main()
     LOG("%s client v%s starting", ALVR_PS4_TITLE, ALVR_PS4_VERSION);
 
     read_ip();
-    config_load(&g_config);
+    init_user();
+    config_load(&g_config, g_user_id);
     LOG("PS4 IP address: %s", g_ip);
 
     Screen screen;
@@ -1035,8 +1119,10 @@ int main()
     g_display_hz = g_config.refresh_rate == 90 ? 90 : 120;
     if (screen.handle > 0 && g_hmd.handle > 0 && screen_register_vr_buffers(&screen, 2) &&
         screen_set_vr_output_mode(&screen, videoout_module, &g_display_hz) &&
-        reproj_start(g_probes[0].handle, screen.handle, 2))
+        reproj_start(g_probes[0].handle, screen.handle, 2)) {
         LOG("reprojection started (2D VR mode, %d Hz)", g_display_hz);
+        g_paced = reproj_enable_frame_event(g_probes[0].handle);
+    }
     else
         LOG("reprojection NOT started, falling back to direct TV output");
     LOG("display %d Hz, stream %d fps (config %d Hz)", g_display_hz, stream_fps(), g_config.refresh_rate);
@@ -1125,7 +1211,9 @@ int main()
                 next_us = now_us;
             next_us += 1000000 / (g_display_hz == 90 ? 90 : 60);
             if (stereo_video) {
-                video_wait_new(g_video_shown_seq, 25000);
+                // Next compositor pass (paced), or the next converted frame.
+                if (!g_paced || !reproj_wait_frame(25000))
+                    video_wait_new(video_published_seq(), 25000);
                 next_us = 0;
             } else if (next_us > now_us) {
                 sceKernelUsleep((uint32_t)(next_us - now_us));

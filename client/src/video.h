@@ -26,17 +26,25 @@ bool video_want_idr();
 // Session ended: forget queued frames and the decoder configuration.
 void video_reset();
 
-// Render thread side: the most recent decoded frame. The returned textures stay valid
-// (and untouched by the decoder) until the call after the next one.
+// Render thread side, once per display frame. Converted frames wait in a FIFO; with `take`
+// the oldest becomes the displayed frame (after skipping all but `keep` others, when more
+// wait), otherwise the displayed frame stays. Returns false while there is no stream. The
+// returned textures stay valid (and untouched by the decoder) until the call after the
+// next one that takes a frame.
 struct VideoFrame {
     const GnmTexture *eye[2];
     uint64_t timestamp_ns; // tracking timestamp the streamer rendered it for
-    uint64_t decoded_us;   // process time when it was decoded
-    unsigned seq;          // increments with every new frame
+    uint64_t decoded_us;   // process time when it was converted
+    unsigned seq;          // increments with every frame taken for display
+    int waiting;           // frames still waiting in the FIFO
 };
-bool video_latest(VideoFrame *out);
-// Waits until a frame newer than after_seq is published (true) or timeout_us passes.
+bool video_next(VideoFrame *out, bool take, int keep);
+// Frames converted but never displayed: FIFO full, skipped by video_next.
+void video_pacing_stats(unsigned *overflow, unsigned *trimmed);
+// Waits until a frame newer than after_seq is converted (true) or timeout_us passes
+// (after_seq: video_published_seq()).
 bool video_wait_new(unsigned after_seq, uint32_t timeout_us);
+unsigned video_published_seq();
 
 struct VideoStats {
     unsigned received, decoded, shown_candidates, dropped, errors;

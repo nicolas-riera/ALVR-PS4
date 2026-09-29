@@ -262,3 +262,33 @@ bool reproj_active()
 {
     return g_active;
 }
+
+// The compositor triggers a user event at the start of each of its passes (once per display
+// refresh; libSceHmd's reprojection thread, reference/decomp/hmd_thread.c), as Unity's PSVR
+// support paces its frames (reference/decomp/beatsaber_psvr.c).
+static OrbisKernelEqueue g_frame_queue;
+static bool g_frame_event;
+static const int FRAME_EVENT_ID = 0x414c; // any id
+
+bool reproj_enable_frame_event(int module)
+{
+    auto set_start = (int (*)(OrbisKernelEqueue, int))resolve(module, "sceHmdReprojectionSetUserEventStart");
+    if (!set_start || sceKernelCreateEqueue(&g_frame_queue, "alvr reproj frame") != 0)
+        return false;
+    int rc = sceKernelAddUserEventEdge(g_frame_queue, FRAME_EVENT_ID);
+    if (rc == 0)
+        rc = set_start(g_frame_queue, FRAME_EVENT_ID);
+    LOG("reprojection frame event -> 0x%08x", (unsigned)rc);
+    g_frame_event = rc == 0;
+    return g_frame_event;
+}
+
+bool reproj_wait_frame(uint32_t timeout_us)
+{
+    if (!g_frame_event)
+        return false;
+    OrbisKernelEvent ev;
+    int count = 0;
+    OrbisKernelUseconds t = timeout_us;
+    return sceKernelWaitEqueue(g_frame_queue, &ev, 1, &count, &t) == 0 && count > 0;
+}

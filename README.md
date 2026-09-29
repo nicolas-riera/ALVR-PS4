@@ -34,11 +34,11 @@ between versions, so any other streamer version may not connect.
 
 ## 1. Install the app on the PS4
 
-Both files come from the project's **Releases** page: `ALVR-PS4-v0.9.x.pkg` for the PS4 and
+Both files come from the project's **Releases** page: `ALVR-PS4-v0.10.x.pkg` for the PS4 and
 `ALVR-PS4-Setup.bat` for the PC.
 
 1. Start GoldHEN on the PS4.
-2. Copy `ALVR-PS4-v0.9.x.pkg` to the console, either to a USB drive or over GoldHEN's FTP
+2. Copy `ALVR-PS4-v0.10.x.pkg` to the console, either to a USB drive or over GoldHEN's FTP
    server (port 2121, to `/data/pkg/`).
 3. In GoldHEN, open **Package Installer** and install the package. The app **ALVR PS4**
    appears on the home screen.
@@ -256,8 +256,8 @@ SteamVR's grey screen, after 3 s (needs the driver patch).
 In the lobby, a short press on **START** (PS Move) or **OPTIONS** (DualShock 4) opens the
 settings in front of you. Point at a button with a Move and pull the trigger, or with the
 DualShock 4 (the laser comes out of its light bar) and press **✕**. Settings: your height
-(places the floor), controller prediction, stream resolution and refresh rate (both at the
-next launch), centring on the headset at SteamVR start, and Reset (click twice; the height
+(places the floor), headset prediction, controller prediction, stream resolution and refresh rate (both marked
+"restart required", in orange once changed), centring on the headset at SteamVR start, and Reset (click twice; the height
 panel then comes back).
 
 **Refresh rate:** 90 Hz (default) runs the PSVR at 90 Hz and asks the PC for 90 frames per
@@ -327,13 +327,18 @@ OpenSSL 1.1 in `~/ps4/libssl11` (PkgTool needs it; Debian 13 no longer ships it)
 | `tools/re/` | reverse-engineering helpers (headless Ghidra on dumped system modules) |
 | `tools/video_bench.py` | video bench: encodes test clips with NVENC (ALVR's settings, one parameter changed per test), plays them on the PS4 (Dev build, TCP 9955) through the real decoder and conversion, and prints the timings |
 
-The PS4 client's settings are stored in `/data/alvr-ps4/config.txt` on the console. Edit
-it over GoldHEN's FTP server, then restart the app:
+The PS4 client's settings are changed in the lobby (Start, or Options on the DualShock 4)
+and kept in the PS4's own save data, per user: Settings > Application Saved Data
+Management shows them as "ALVR PS4 - Settings", where they can be copied, backed up or
+deleted like a game save (deleting them brings back the first launch wizard and a new
+client name, which the PC must trust again). The development build shares the stable
+app's save. The save holds these values:
 
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `hostname` | random `NNNN.client` | the name the PS4 announces to ALVR |
 | `resolution_percent` | `130` | resolution per eye, in percent of the PSVR panel (960×1080), 50–160. The PS4 decoder slows down sharply above about 1920×1088 per frame (both eyes): with foveated encoding at the recommended settings, 130% decodes a 1920×1056 frame. Without foveated encoding, use 100 |
+| `head_prediction` | `40` | "Headset prediction": share of the stream latency over which the headset position sent to SteamVR is predicted, 0–100 (0 = current position) |
 | `controller_prediction_ms` | `0` | extra controller prediction on top of SteamVR's, 0–60 |
 | `user_height_cm` | `0` (not set) | your height, set in the lobby (first launch wizard, then settings); `0` shows the wizard at the next launch (a settings Reset also shows it at once) |
 | `camera_height_cm` | `0` (estimated) | height of the PS Camera above the floor, derived from your height |

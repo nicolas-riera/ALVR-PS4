@@ -7,7 +7,7 @@
 #include "log.h"
 
 // Panel layout in metres (panel coordinates: x right, y up, origin at the centre).
-static const float PANEL_W = 1.02f, PANEL_TOP = 0.31f, PANEL_BOTTOM = -0.53f;
+static const float PANEL_W = 1.02f, PANEL_TOP = 0.31f, PANEL_BOTTOM = -0.61f;
 static const float WIZARD_W = 0.90f, WIZARD_TOP = 0.19f, WIZARD_BOTTOM = -0.21f;
 static const float LABEL_H = 0.022f, TITLE_H = 0.032f, TIP_H = 0.0135f;
 static const float BTN_W = 0.07f, BTN_H = 0.05f;
@@ -17,8 +17,9 @@ static const float TRIGGER_PRESS = 0.55f, TRIGGER_RELEASE = 0.35f;
 static const uint64_t REPEAT_DELAY_US = 450000, REPEAT_US = 50000;
 static const uint64_t SAVE_DELAY_US = 2000000; // config written 2 s after the last change
 
-enum Button { BTN_NONE = -1, BTN_HEIGHT_MINUS, BTN_HEIGHT_PLUS, BTN_PRED_MINUS, BTN_PRED_PLUS, BTN_RES_MINUS,
-              BTN_RES_PLUS, BTN_RATE, BTN_CENTER, BTN_CLOSE, BTN_RESET, BTN_CONFIRM, BTN_COUNT };
+enum Button { BTN_NONE = -1, BTN_HEIGHT_MINUS, BTN_HEIGHT_PLUS, BTN_HPRED_MINUS, BTN_HPRED_PLUS, BTN_PRED_MINUS,
+              BTN_PRED_PLUS, BTN_RES_MINUS, BTN_RES_PLUS, BTN_RATE, BTN_CENTER, BTN_CLOSE, BTN_RESET, BTN_CONFIRM,
+              BTN_COUNT };
 
 struct Rect {
     float x0, y0, x1, y1;
@@ -26,8 +27,8 @@ struct Rect {
 
 // Row centres of the settings panel.
 static const float ROW_TITLE = 0.255f, ROW_USER = 0.165f, ROW_CAMERA = 0.095f, ROW_TIP = 0.045f,
-                   ROW_PRED = -0.035f, ROW_RES = -0.115f, ROW_RATE = -0.195f, ROW_CENTER = -0.275f,
-                   ROW_ACTIONS = -0.375f, ROW_RESET = -0.470f;
+                   ROW_HPRED = -0.035f, ROW_PRED = -0.115f, ROW_RES = -0.195f, ROW_RATE = -0.275f,
+                   ROW_CENTER = -0.355f, ROW_ACTIONS = -0.455f, ROW_RESET = -0.550f;
 // Row centres of the first launch wizard.
 static const float WROW_TITLE = 0.135f, WROW_TEXT = 0.075f, WROW_USER = 0.000f, WROW_TIP = -0.060f,
                    WROW_CONFIRM = -0.140f;
@@ -55,7 +56,7 @@ static struct {
     uint64_t last_change_us;
     uint64_t reset_armed_us; // first Reset click, waiting for the confirmation
     // Values shown, refreshed by settings_update.
-    char user[48], camera[48], tip[96], pred[32], res[48], rate[16];
+    char user[48], camera[48], tip[96], hpred[48], pred[32], res[48], rate[16];
 } g;
 
 static bool button_active(int b)
@@ -81,6 +82,8 @@ static Rect button_rect(int b)
     switch (b) {
     case BTN_HEIGHT_MINUS: return pm(MINUS_X, ROW_USER);
     case BTN_HEIGHT_PLUS: return pm(PLUS_X, ROW_USER);
+    case BTN_HPRED_MINUS: return pm(MINUS_X, ROW_HPRED);
+    case BTN_HPRED_PLUS: return pm(PLUS_X, ROW_HPRED);
     case BTN_PRED_MINUS: return pm(MINUS_X, ROW_PRED);
     case BTN_PRED_PLUS: return pm(PLUS_X, ROW_PRED);
     case BTN_RES_MINUS: return pm(MINUS_X, ROW_RES);
@@ -105,13 +108,17 @@ static void save_now(const ClientConfig *cfg)
 {
     config_store(cfg);
     g.dirty = false;
-    LOG("settings: saved (user height %d cm, camera height %d cm, prediction %d ms, resolution %d%%, %d Hz, "
-        "center on SteamVR start %d)",
-        cfg->user_height_cm, cfg->camera_height_cm, cfg->controller_prediction_ms, cfg->resolution_percent,
-        cfg->refresh_rate, cfg->center_on_connect);
+    LOG("settings: saved (user height %d cm, camera height %d cm, headset prediction %d%%, controller prediction %d ms, "
+        "resolution %d%%, %d Hz, center on SteamVR start %d)",
+        cfg->user_height_cm, cfg->camera_height_cm, cfg->head_prediction_percent, cfg->controller_prediction_ms,
+        cfg->resolution_percent, cfg->refresh_rate, cfg->center_on_connect);
 }
 
 static ClientConfig *g_cfg; // last config seen, to save on close
+// Values in use since the launch, for the settings that apply at the next one: their
+// "(restart required)" turns orange once changed.
+static int g_launch_resolution = -1, g_launch_refresh_rate = -1;
+static const uint32_t RESTART_RGB = 0x8090a0, RESTART_CHANGED_RGB = 0xffa030;
 
 static void open_panel(Vec3 head_pos, bool wizard)
 {
@@ -191,6 +198,7 @@ static unsigned apply(int b, const SettingsContext &ctx, uint64_t now)
         g.reset_armed_us = 0;
         c->resolution_percent = 130;
         c->controller_prediction_ms = 0;
+        c->head_prediction_percent = CONFIG_DEFAULT_HEAD_PREDICTION;
         c->camera_height_cm = 0;
         c->user_height_cm = 0;
         c->center_on_connect = 1;
@@ -219,6 +227,12 @@ static unsigned apply(int b, const SettingsContext &ctx, uint64_t now)
     case BTN_RATE:
         c->refresh_rate = c->refresh_rate == 90 ? 60 : 90;
         return 0;
+    case BTN_HPRED_MINUS:
+    case BTN_HPRED_PLUS: {
+        int v = c->head_prediction_percent + (b == BTN_HPRED_PLUS ? 10 : -10);
+        c->head_prediction_percent = v < 0 ? 0 : v > 100 ? 100 : v;
+        return 0;
+    }
     case BTN_PRED_MINUS:
     case BTN_PRED_PLUS: {
         int v = c->controller_prediction_ms + (b == BTN_PRED_PLUS ? 5 : -5);
@@ -245,6 +259,10 @@ unsigned settings_update(const SettingsContext &ctx, const SettingsRay rays[LOBB
 {
     *clicked_hand = -1;
     g_cfg = ctx.config;
+    if (g_launch_resolution < 0) {
+        g_launch_resolution = g_cfg->resolution_percent;
+        g_launch_refresh_rate = g_cfg->refresh_rate;
+    }
     if (!g.open)
         return 0;
     unsigned actions = 0;
@@ -345,8 +363,12 @@ unsigned settings_update(const SettingsContext &ctx, const SettingsRay rays[LOBB
         snprintf(g.tip, sizeof(g.tip), "%s",
                  c->user_height_cm > 0 ? "Stand straight when you change it: the floor is placed from your headset"
                                        : "Floor estimated: stand straight and set your height with - / +");
+    if (c->head_prediction_percent)
+        snprintf(g.hpred, sizeof(g.hpred), "%d %%  of the latency", c->head_prediction_percent);
+    else
+        snprintf(g.hpred, sizeof(g.hpred), "Off");
     snprintf(g.pred, sizeof(g.pred), "%d ms", c->controller_prediction_ms);
-    snprintf(g.res, sizeof(g.res), "%d %%  (next launch)", c->resolution_percent);
+    snprintf(g.res, sizeof(g.res), "%d %%", c->resolution_percent);
     snprintf(g.rate, sizeof(g.rate), "%d Hz", c->refresh_rate);
     if (close || (actions & (SETTINGS_CONFIRMED | SETTINGS_RESET)))
         close_panel();
@@ -410,17 +432,25 @@ void settings_build(LobbyPanel *panel, LobbyPointer pointers[LOBBY_POINTERS])
         text(panel, lx0, vx0, ROW_CAMERA, "PS Camera height", LABEL_H, -1, 0x8090a0);
         text(panel, vx0, vx1, ROW_CAMERA, g.camera, LABEL_H, -1, 0xa0a8b0);
         text(panel, lx0, w / 2, ROW_TIP, g.tip, TIP_H, -1, 0x8090a0);
+        text(panel, lx0, vx0, ROW_HPRED, "Headset prediction", LABEL_H, -1, 0xc0c8d0);
+        text(panel, vx0, vx1, ROW_HPRED, g.hpred, LABEL_H, -1, 0xffffff);
         text(panel, lx0, vx0, ROW_PRED, "Controller prediction", LABEL_H, -1, 0xc0c8d0);
         text(panel, vx0, vx1, ROW_PRED, g.pred, LABEL_H, -1, 0xffffff);
         text(panel, lx0, vx0, ROW_RES, "Stream resolution", LABEL_H, -1, 0xc0c8d0);
+        const bool res_changed = g_cfg && g_cfg->resolution_percent != g_launch_resolution;
+        const bool rate_changed = g_cfg && g_cfg->refresh_rate != g_launch_refresh_rate;
         text(panel, vx0, vx1, ROW_RES, g.res, LABEL_H, -1, 0xffffff);
+        const float rx0 = vx0 + 0.125f, rh = LABEL_H * 0.85f; // "(restart required)", after the value
+        text(panel, rx0, vx1, ROW_RES, "(restart required)", rh, -1, res_changed ? RESTART_CHANGED_RGB : RESTART_RGB);
         text(panel, lx0, vx0, ROW_RATE, "Refresh rate", LABEL_H, -1, 0xc0c8d0);
-        text(panel, vx0, vx1, ROW_RATE, "(next launch)", LABEL_H, -1, 0xffffff);
+        text(panel, rx0, vx1, ROW_RATE, "(restart required)", rh, -1,
+             rate_changed ? RESTART_CHANGED_RGB : RESTART_RGB);
         text(panel, lx0, MINUS_X - 0.01f, ROW_CENTER, "Center on the headset at SteamVR start", LABEL_H, -1,
              0xc0c8d0);
     }
 
-    static const char *labels[BTN_COUNT] = {"-", "+", "-", "+", "-", "+", "", "On", "Close", "Reset settings", "Confirm"};
+    static const char *labels[BTN_COUNT] = {"-", "+", "-", "+", "-", "+", "-", "+", "", "On", "Close", "Reset settings",
+                                            "Confirm"};
     labels[BTN_RATE] = g.rate;
     labels[BTN_RESET] = g.reset_armed_us ? "Click again to reset" : "Reset settings";
     labels[BTN_CENTER] = g_cfg && !g_cfg->center_on_connect ? "Off" : "On";

@@ -1,24 +1,122 @@
 #include "config.h"
 
+#include <pthread.h>
 #include <stdio.h>
 #include <string.h>
-#include <sys/stat.h>
 
+#include <orbis/SaveData.h>
 #include <orbis/libkernel.h>
 
 #include "log.h"
 
-static const char *CONFIG_DIR = "/data/alvr-ps4";
-static const char *CONFIG_PATH = "/data/alvr-ps4/config.txt";
+// Settings live in the PS4's own save data (Settings > Application Saved Data Management),
+// in one save "settings" of the user who started the app, as a small key=value file. Both
+// the stable and the Dev app use the stable app's save (INSTALL_DIR_SAVEDATA in the Dev
+// param.sfo), so they keep the same hostname and the PC keeps trusting them.
 
-void config_load(ClientConfig *cfg)
+static const char *SAVE_DIR_NAME = "settings";
+static const char *SAVE_FILE = "settings.txt";
+static const uint64_t SAVE_BLOCKS = 96; // the minimum (96 x 32 KiB)
+
+static int g_user = -1;
+static bool g_save_ok; // libSceSaveData initialized
+
+// Saving runs on its own thread: mounting and committing take long enough to stall a frame.
+static pthread_t g_saver;
+static pthread_mutex_t g_save_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_save_cond = PTHREAD_COND_INITIALIZER;
+static ClientConfig g_pending;
+static bool g_has_pending, g_saver_started;
+
+// Mounts the save (created on first use). Returns false with the error logged.
+static bool mount(bool write, OrbisSaveDataMountPoint *mp)
 {
-    memset(cfg, 0, sizeof(*cfg));
-    cfg->resolution_percent = 130; // 1248x1404 per eye; foveated encoding keeps the decoded frame at 1920x1056
-    cfg->controller_prediction_ms = 0;
-    cfg->center_on_connect = 1;
-    cfg->refresh_rate = 90;
-    FILE *f = fopen(CONFIG_PATH, "r");
+    OrbisSaveDataDirName dir;
+    memset(&dir, 0, sizeof(dir));
+    strncpy(dir.data, SAVE_DIR_NAME, sizeof(dir.data) - 1);
+    OrbisSaveDataMount2 m;
+    memset(&m, 0, sizeof(m));
+    m.userId = g_user;
+    m.dirName = &dir;
+    m.blocks = SAVE_BLOCKS;
+    m.mountMode = write ? ORBIS_SAVE_DATA_MOUNT_MODE_RDWR | ORBIS_SAVE_DATA_MOUNT_MODE_CREATE2 |
+                              ORBIS_SAVE_DATA_MOUNT_MODE_COPY_ICON
+                        : ORBIS_SAVE_DATA_MOUNT_MODE_RDONLY;
+    alignas(8) uint8_t result[128]; // OrbisSaveDataMountResult, with room to spare
+    memset(result, 0, sizeof(result));
+    int rc = sceSaveDataMount2(&m, (OrbisSaveDataMountResult *)result);
+    if (rc < 0) {
+        // 0x809f0008: no save yet (read-only mount of a save never written).
+        if (write || (unsigned)rc != 0x809f0008)
+            LOG("config: save data mount (%s, user 0x%x) -> 0x%08x", write ? "write" : "read", g_user, (unsigned)rc);
+        return false;
+    }
+    memset(mp, 0, sizeof(*mp));
+    memcpy(mp->data, result, sizeof(mp->data) - 1); // mount point name, first in the result
+    return true;
+}
+
+static void unmount(OrbisSaveDataMountPoint *mp)
+{
+    int rc = sceSaveDataUmount(mp);
+    if (rc < 0)
+        LOG("config: save data unmount -> 0x%08x", (unsigned)rc);
+}
+
+static void write_save(const ClientConfig *cfg)
+{
+    OrbisSaveDataMountPoint mp;
+    if (!mount(true, &mp))
+        return;
+    char path[64];
+    snprintf(path, sizeof(path), "/%s/%s", mp.data[0] == '/' ? mp.data + 1 : mp.data, SAVE_FILE);
+    FILE *f = fopen(path, "w");
+    if (f) {
+        fprintf(f, "hostname=%s\n", cfg->hostname);
+        fprintf(f, "resolution_percent=%d\n", cfg->resolution_percent);
+        fprintf(f, "controller_prediction_ms=%d\n", cfg->controller_prediction_ms);
+        fprintf(f, "head_prediction=%d\n", cfg->head_prediction_percent);
+        fprintf(f, "camera_height_cm=%d\n", cfg->camera_height_cm);
+        fprintf(f, "user_height_cm=%d\n", cfg->user_height_cm);
+        fprintf(f, "center_on_steamvr_start=%d\n", cfg->center_on_connect);
+        fprintf(f, "refresh_rate_hz=%d\n", cfg->refresh_rate);
+        fclose(f);
+    } else {
+        LOG("config: cannot write %s", path);
+    }
+    // What the system's saved data list shows.
+    char detail[128];
+    snprintf(detail, sizeof(detail), "ALVR client name %s", cfg->hostname);
+    sceSaveDataSetParam(&mp, ORBIS_SAVE_DATA_PARAM_TYPE_TITLE, (void *)"ALVR PS4", 9);
+    sceSaveDataSetParam(&mp, ORBIS_SAVE_DATA_PARAM_TYPE_SUB_TITLE, (void *)"Settings", 9);
+    sceSaveDataSetParam(&mp, ORBIS_SAVE_DATA_PARAM_TYPE_DETAIL, detail, strlen(detail) + 1);
+    unmount(&mp);
+}
+
+static void *saver_thread(void *)
+{
+    for (;;) {
+        pthread_mutex_lock(&g_save_lock);
+        while (!g_has_pending)
+            pthread_cond_wait(&g_save_cond, &g_save_lock);
+        ClientConfig cfg = g_pending;
+        g_has_pending = false;
+        pthread_mutex_unlock(&g_save_lock);
+        const uint64_t t0 = sceKernelGetProcessTime();
+        write_save(&cfg);
+        LOG("config: saved (%.0f ms)", (sceKernelGetProcessTime() - t0) / 1000.0);
+    }
+    return nullptr;
+}
+
+static void read_save(ClientConfig *cfg)
+{
+    OrbisSaveDataMountPoint mp;
+    if (!mount(false, &mp))
+        return;
+    char path[64];
+    snprintf(path, sizeof(path), "/%s/%s", mp.data[0] == '/' ? mp.data + 1 : mp.data, SAVE_FILE);
+    FILE *f = fopen(path, "r");
     if (f) {
         char line[128];
         while (fgets(line, sizeof(line), f)) {
@@ -27,6 +125,8 @@ void config_load(ClientConfig *cfg)
             if (sscanf(line, "resolution_percent=%d", &cfg->resolution_percent) == 1)
                 continue;
             if (sscanf(line, "controller_prediction_ms=%d", &cfg->controller_prediction_ms) == 1)
+                continue;
+            if (sscanf(line, "head_prediction=%d", &cfg->head_prediction_percent) == 1)
                 continue;
             if (sscanf(line, "camera_height_cm=%d", &cfg->camera_height_cm) == 1)
                 continue;
@@ -39,10 +139,32 @@ void config_load(ClientConfig *cfg)
         }
         fclose(f);
     }
+    unmount(&mp);
+}
+
+void config_load(ClientConfig *cfg, int user_id)
+{
+    memset(cfg, 0, sizeof(*cfg));
+    cfg->resolution_percent = 130; // 1248x1404 per eye; foveated encoding keeps the decoded frame at 1920x1056
+    cfg->controller_prediction_ms = 0;
+    cfg->head_prediction_percent = CONFIG_DEFAULT_HEAD_PREDICTION;
+    cfg->center_on_connect = 1;
+    cfg->refresh_rate = 90;
+
+    g_user = user_id;
+    int rc = sceSaveDataInitialize3(0);
+    g_save_ok = rc >= 0;
+    if (!g_save_ok)
+        LOG("config: sceSaveDataInitialize3 -> 0x%08x, settings will not be kept", (unsigned)rc);
+    else
+        read_save(cfg);
+
     if (cfg->resolution_percent < 50 || cfg->resolution_percent > 160)
         cfg->resolution_percent = 130;
     if (cfg->controller_prediction_ms < 0 || cfg->controller_prediction_ms > 60)
         cfg->controller_prediction_ms = 0;
+    if (cfg->head_prediction_percent < 0 || cfg->head_prediction_percent > 100)
+        cfg->head_prediction_percent = CONFIG_DEFAULT_HEAD_PREDICTION;
     if (cfg->camera_height_cm < 0 || cfg->camera_height_cm > 300)
         cfg->camera_height_cm = 0;
     if (cfg->user_height_cm < 100 || cfg->user_height_cm > 230)
@@ -51,10 +173,10 @@ void config_load(ClientConfig *cfg)
     if (cfg->refresh_rate != 60 && cfg->refresh_rate != 90)
         cfg->refresh_rate = 90;
     if (cfg->hostname[0]) {
-        LOG("config: hostname %s, resolution %d%%, %d Hz, extra controller prediction %d ms, camera height %d cm, "
-            "user height %d cm (from %s)", cfg->hostname, cfg->resolution_percent, cfg->refresh_rate,
-            cfg->controller_prediction_ms, cfg->camera_height_cm, cfg->user_height_cm, CONFIG_PATH);
-        config_store(cfg); // writes keys added by newer versions
+        LOG("config: hostname %s, resolution %d%%, %d Hz, headset prediction %d%%, extra controller prediction %d ms, "
+            "camera height %d cm, user height %d cm (save data of user 0x%x)", cfg->hostname, cfg->resolution_percent,
+            cfg->refresh_rate, cfg->head_prediction_percent, cfg->controller_prediction_ms, cfg->camera_height_cm,
+            cfg->user_height_cm, user_id);
         return;
     }
     // Same format as ALVR 20.14.1 (alvr/client_core/src/storage.rs): 4 random digits.
@@ -67,18 +189,13 @@ void config_load(ClientConfig *cfg)
 
 void config_store(const ClientConfig *cfg)
 {
-    mkdir(CONFIG_DIR, 0777);
-    FILE *f = fopen(CONFIG_PATH, "w");
-    if (!f) {
-        LOG("config: cannot write %s", CONFIG_PATH);
+    if (!g_save_ok)
         return;
-    }
-    fprintf(f, "hostname=%s\n", cfg->hostname);
-    fprintf(f, "resolution_percent=%d\n", cfg->resolution_percent);
-    fprintf(f, "controller_prediction_ms=%d\n", cfg->controller_prediction_ms);
-    fprintf(f, "camera_height_cm=%d\n", cfg->camera_height_cm);
-    fprintf(f, "user_height_cm=%d\n", cfg->user_height_cm);
-    fprintf(f, "center_on_steamvr_start=%d\n", cfg->center_on_connect);
-    fprintf(f, "refresh_rate_hz=%d\n", cfg->refresh_rate);
-    fclose(f);
+    pthread_mutex_lock(&g_save_lock);
+    if (!g_saver_started)
+        g_saver_started = pthread_create(&g_saver, nullptr, saver_thread, nullptr) == 0;
+    g_pending = *cfg;
+    g_has_pending = true;
+    pthread_cond_signal(&g_save_cond);
+    pthread_mutex_unlock(&g_save_lock);
 }

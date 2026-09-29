@@ -247,7 +247,7 @@ static void serve(int fd)
     }
 }
 
-static void *bench_thread(void *)
+[[maybe_unused]] static void *bench_thread(void *) // started by the Dev build only
 {
     int listener = socket(AF_INET, SOCK_STREAM, 0);
     int one = 1;

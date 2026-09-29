@@ -43,3 +43,7 @@ int reproj_submit_stereo(const GnmTexture *left, const GnmTexture *right, const 
 // Stops reprojection and releases the display buffers.
 void reproj_stop();
 bool reproj_active();
+// Compositor pass event (after reproj_start): reproj_wait_frame returns at the start of each
+// compositor pass, i.e. once per display refresh, or false after timeout_us.
+bool reproj_enable_frame_event(int module);
+bool reproj_wait_frame(uint32_t timeout_us);

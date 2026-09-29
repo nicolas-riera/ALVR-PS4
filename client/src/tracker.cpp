@@ -1,5 +1,6 @@
 #include "tracker.h"
 
+#include <math.h>
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
@@ -68,6 +69,10 @@ struct UpdateMotionSensorDataParam {
     int32_t handle;
     int32_t reserved[4];
 };
+
+// Head velocity smoothing time constant, and the largest position lead (prediction).
+static const float HEAD_VELOCITY_SMOOTHING_S = 0.05f;
+static const float HEAD_PREDICTION_MAX_M = 0.15f;
 
 struct GetResultParam {
     uint32_t size;
@@ -418,6 +423,42 @@ void tracker_update(TrackerState *st)
     st->head_pose = r->head_pose;
     st->timestamp = r->timestamp;
     st->results_ok++;
+
+    // Pose for SteamVR: the position moved ahead along a smoothed velocity, the rotation as
+    // it is (the PS4 reprojection corrects the rotation of each frame to the latest pose).
+    // The tracker's own prediction (sceVrTrackerGetResult with a later prediction_time,
+    // tried first) jittered strongly in SteamVR over 60 ms: its velocity and acceleration
+    // jump at each camera frame. The smoothing filters those jumps out.
+    const bool seen = r->position_quality == 9 || r->position_quality == 6;
+    const float dt = st->velocity_ts && r->timestamp > st->velocity_ts ? (r->timestamp - st->velocity_ts) / 1e6f : 0.0f;
+    st->velocity_ts = r->timestamp;
+    if (dt > 0.0f) {
+        const float k = dt >= HEAD_VELOCITY_SMOOTHING_S ? 1.0f : dt / HEAD_VELOCITY_SMOOTHING_S;
+        for (int i = 0; i < 3; i++)
+            st->velocity[i] += ((seen ? r->velocity[i] : 0.0f) - st->velocity[i]) * k;
+    }
+    const float ahead = g_tracker_head_prediction_us / 1e6f;
+    float off[3], len2 = 0.0f;
+    for (int i = 0; i < 3; i++) {
+        off[i] = st->velocity[i] * ahead;
+        len2 += off[i] * off[i];
+    }
+    st->head_lead_m = sqrtf(len2);
+    if (st->head_lead_m > HEAD_PREDICTION_MAX_M) {
+        for (float &o : off)
+            o *= HEAD_PREDICTION_MAX_M / st->head_lead_m;
+        st->head_lead_m = HEAD_PREDICTION_MAX_M;
+    }
+    auto lead = [&](const TrackerPose &in, TrackerPose *out) {
+        *out = in;
+        out->px += off[0];
+        out->py += off[1];
+        out->pz += off[2];
+    };
+    lead(st->device_pose, &st->predicted_device_pose);
+    lead(st->eye_pose[0], &st->predicted_eye_pose[0]);
+    lead(st->eye_pose[1], &st->predicted_eye_pose[1]);
+    st->predicted_timestamp = st->timestamp;
 }
 
 void tracker_stop(int module, int camera_module)
@@ -542,6 +583,7 @@ bool tracker_register_device(TrackedDevice *d, uint32_t type, int handle, int ow
 }
 
 volatile uint32_t g_tracker_controller_prediction_us = 0;
+volatile uint32_t g_tracker_head_prediction_us = 0;
 
 static void qmul(const float a[4], const float b[4], float out[4]) // x, y, z, w
 {
