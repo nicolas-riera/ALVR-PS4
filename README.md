@@ -24,7 +24,7 @@ back in normal mode.
 | Side | What |
 | --- | --- |
 | PS4 | PS4 or PS4 Pro with [GoldHEN](https://github.com/GoldHEN/GoldHEN) (tested on a FAT and on a Pro, both firmware 11.00) |
-| VR | PSVR (CUH-ZVR1 or ZVR2), PS Camera, *two PS Move controllers* (optional) |
+| VR | PSVR (CUH-ZVR1 or ZVR2), PS Camera, *two PS Move controllers (optional)* |
 | PC | Windows 10 or 11, SteamVR, **ALVR streamer 20.14.1 exactly** (the setup below downloads it) |
 | Network | PC and PS4 on the same local network, PS4 on Ethernet (or at least 5 GHz Wi-Fi) |
 
