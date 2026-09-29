@@ -11,12 +11,13 @@ SteamVR. The PS4 receives the video stream and shows it in the PSVR. It sends ba
 headset tracking (PS Camera) and the PS Move controllers (tracking, buttons, vibration).
 
 The app behaves like a regular PSVR game: it uses the system VR mode (PSVR quick menu,
-lens distortion, 120 Hz reprojection), and closing it from the PS4 menu puts the console
-back in normal mode.
+lens distortion, reprojection), and closing it from the PS4 menu puts the console back in
+normal mode.
 
 > Status: headset tracking, the PS Move controllers (emulated as HTC Vive wands, with
-> vibration), the lobby, 60 Hz video (hardware H.264 decoding with foveated encoding, shown
-> by the system at 120 Hz through reprojection), game audio and the microphone work.
+> vibration), the lobby, video (hardware H.264 decoding with foveated encoding, 90 Hz by
+> default, or 60 Hz shown by the system at 120 Hz through reprojection), game audio and the
+> microphone work. Mainly tested at 60 Hz.
 > Mainly tested with VRChat and Beat Saber on a PS4 Pro.
 
 ## Requirements
@@ -134,9 +135,9 @@ device properties → Advanced), the only rate the PS4 plays.
 | --- | --- | --- |
 | Video → Preferred codec | **H264** | the PS4 hardware decoder is used for H.264 only |
 | Video → Foveated encoding | **on**: center region width 0.5, height 0.5, center shift X 0, Y 0, horizontal and vertical edge ratio 2 | keeps the center of each eye at full resolution and squeezes the edges 2:1 (the lenses blur them anyway): at the default 130% resolution the PS4 decodes a 1920×1056 frame instead of 2496×1408, the size its decoder handles quickly. The client reads these values from the streamer, so other values work too; a smaller center or a higher edge ratio decodes faster but blurs more of the view |
-| Video → Preferred FPS | **60** | the client offers 60 Hz (the PSVR reprojects it to 120 Hz) |
+| Video → Preferred FPS | **90** | the client offers only the rate set on the PS4 (90 by default; 60 is reprojected to 120 Hz) |
 | Video → Encoder → Quality preset | **Quality** (NVENC: **P4**) | the fastest preset blurs text; the PC's GPU pays for it, not the PS4 |
-| Video → Bitrate | **Constant, 60 Mbps** | 30 Mbps is too low for readable text |
+| Video → Bitrate | **Constant, 80 Mbps** | the PS4 decodes 90 fps up to about 130 Mbps (measured with `tools/video_bench.py`), but 100 Mbps was too much in use; 30 Mbps is too low for readable text |
 | Headset → Extra OpenVR props | `TrackingSystemNameString` = `htc`, `ModelNumberString` = `PlayStation VR`, `ManufacturerNameString` = `Sony Interactive Entertainment`, `RenderModelNameString` = `generic_hmd`, `RegisteredDeviceTypeString` = `sony/psvr`, `DriverVersionString` = `20.14.1` | the "Custom" headset mode declares no identity at all; VRChat left the head at the origin |
 | Headset → Controllers → Extra OpenVR props | also `CurrentUniverseIdUint64` = `2` | same tracking universe as the headset |
 | Audio → Game audio | **on** | played in the PSVR headphones |
@@ -209,8 +210,10 @@ SteamVR → Settings → Startup / Shutdown → **Manage Add-ons**, then turn of
 2. Turn on the PS Moves: **right hand first, then left hand**. The first Move connected
    (magenta sphere) is the right hand.
 3. Start **ALVR PS4** on the PS4. The headset enters VR mode and shows the lobby: a white
-   grid with your Moves and the camera. An information panel in front of you shows the
-   PS4's IP address, its ALVR hostname (for example `5026.client`) and the connection state.
+   grid with your Moves, your DualShock 4 and the camera. An information panel in front of
+   you shows the PS4's IP address, its ALVR hostname (for example `5026.client`) and the
+   connection state. The first time, a panel asks for your height: stand straight, set it
+   with − / +, then Confirm (the PC is searched for after that).
 4. On the PC, start the ALVR dashboard. The PS4 appears under **Devices** with its
    hostname. Click **Trust**. If it does not appear, add it by hand with the PS4 IP address
    shown in the lobby.
@@ -248,6 +251,32 @@ reset, as in PSVR games.
 as "searching" after 10 s. A headset the camera has lost is shown as "searching", with
 SteamVR's grey screen, after 3 s (needs the driver patch).
 
+### Lobby settings
+
+In the lobby, a short press on **START** (PS Move) or **OPTIONS** (DualShock 4) opens the
+settings in front of you. Point at a button with a Move and pull the trigger, or with the
+DualShock 4 (the laser comes out of its light bar) and press **✕**. Settings: your height
+(places the floor), controller prediction, stream resolution and refresh rate (both at the
+next launch), centring on the headset at SteamVR start, and Reset (click twice; the height
+panel then comes back).
+
+**Refresh rate:** 90 Hz (default) runs the PSVR at 90 Hz and asks the PC for 90 frames per
+second. 60 Hz runs the PSVR at 120 Hz with each frame shown twice by the system, as most
+PSVR games do; use it if 90 Hz is not smooth. With 60 Hz, the ALVR dashboard warns that the
+preferred FPS (90) is not supported and uses 60: that is expected.
+
+### DualShock 4 in the lobby
+
+The DualShock 4 is tracked by its light bar, like the Moves, and shown in the lobby with
+everything it reports: buttons, sticks, L2 / R2, fingers on the touchpad and vibration. In
+the lobby, L2 and R2 drive its two motors, to try them. It is not sent to SteamVR.
+
+The PS4 tracks only two controllers in all: the PS Moves come first, so with both Moves on
+the DualShock 4 is not tracked. It is then shown still, in grey, in front of the play area
+("Not tracked"), with its buttons still working (Options opens the settings). Controllers
+of other users logged in on the console are shown with their user number, and tracked
+when there is room.
+
 ## Troubleshooting
 
 | Symptom | Fix |
@@ -280,13 +309,14 @@ OpenSSL 1.1 in `~/ps4/libssl11` (PkgTool needs it; Debian 13 no longer ships it)
 
 | Path | Contents |
 | --- | --- |
-| `client/src/main.cpp` | startup, main loop (60 Hz), lobby/video display, tracking uplink |
+| `client/src/main.cpp` | startup, main loop (90 or 60 Hz), lobby/video display, tracking uplink |
 | `client/src/alvr_client.*` | ALVR 20.14.1 protocol: discovery, handshake, streams, video reassembly |
 | `client/src/video.*` | hardware H.264 decoding (libSceVideodec2), NV12 → RGB |
 | `client/src/foveation.*` | foveated encoding math (expansion of the squeezed eye edges), same as the official client |
 | `client/src/audio.*` | game audio playback (libSceAudioOut) and microphone capture (libSceAudioIn) |
 | `client/src/hmd.*`, `reproj.*`, `screen.*` | PSVR (libSceHmd) and the system reprojection |
-| `client/src/tracker.*`, `camera.*`, `move.*`, `wand.*` | camera tracking (libSceVrTracker), PS Move, Vive wand emulation |
+| `client/src/tracker.*`, `camera.*`, `move.*`, `wand.*`, `pad.*`, `hid.*` | camera tracking (libSceVrTracker), PS Move, Vive wand emulation, DualShock 4, raw HID reports |
+| `client/src/settings.*` | lobby settings panel and first launch height panel |
 | `client/src/lobby.*` | software-rendered lobby |
 | `docs/alvr-20.14.1-protocol.md` | the ALVR 20.14.1 wire protocol, as implemented |
 | `tools/alvr_setup.py` | PC-side ALVR settings for this client |
@@ -295,6 +325,7 @@ OpenSSL 1.1 in `~/ps4/libssl11` (PkgTool needs it; Debian 13 no longer ships it)
 | `tools/icons/make_icons.py` | draws the PSVR and PS Move SteamVR status icons (`pc-setup/icons`) |
 | `tools/make_release.py` | builds `release/` (`ALVR-PS4-v<version>.pkg`, `ALVR-PS4-Setup.bat`) for the GitHub release |
 | `tools/re/` | reverse-engineering helpers (headless Ghidra on dumped system modules) |
+| `tools/video_bench.py` | video bench: encodes test clips with NVENC (ALVR's settings, one parameter changed per test), plays them on the PS4 (Dev build, TCP 9955) through the real decoder and conversion, and prints the timings |
 
 The PS4 client's settings are stored in `/data/alvr-ps4/config.txt` on the console. Edit
 it over GoldHEN's FTP server, then restart the app:
@@ -307,6 +338,7 @@ it over GoldHEN's FTP server, then restart the app:
 | `user_height_cm` | `0` (not set) | your height, set in the lobby (first launch wizard, then settings); `0` shows the wizard at the next launch (a settings Reset also shows it at once) |
 | `camera_height_cm` | `0` (estimated) | height of the PS Camera above the floor, derived from your height |
 | `center_on_steamvr_start` | `1` | `1`: the play area centre is placed on the headset each time SteamVR connects; `0`: only once, at the first tracking |
+| `refresh_rate_hz` | `90` | `90`: PSVR at 90 Hz, 90 fps stream; `60`: PSVR at 120 Hz, 60 fps stream (each frame shown twice) |
 
 ## Credits
 

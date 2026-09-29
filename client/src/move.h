@@ -24,6 +24,7 @@ enum MoveButton : uint16_t {
 
 struct MoveController {
     int handle;       // sceMoveOpen handle, < 0 if not opened
+    int owner;        // user id
     bool connected;   // sceMoveGetDeviceInfo / ReadState succeed
     float sphere_radius;
     uint16_t buttons; // MoveButton bits
@@ -41,8 +42,8 @@ struct MoveController {
 // Battery as a 0..1 gauge and charging flag; false when unknown.
 bool move_battery(const MoveController &ctl, float *gauge, bool *charging);
 
-// Opens both controllers for the user and registers them with the tracker
-// (call after tracker_start).
+// Opens both controllers of a user; they are registered with the tracker once connected
+// (call after tracker_start; once per logged-in user).
 void move_start(int move_module, int user_id, MoveController out[MOVE_MAX]);
 // Reads buttons and tracking; (un)registers controllers as they (dis)connect.
 void move_update(MoveController ctl[MOVE_MAX]);

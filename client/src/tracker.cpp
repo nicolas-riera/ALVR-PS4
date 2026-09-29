@@ -462,11 +462,43 @@ bool tracker_reregister_hmd(int hmd_handle)
     return rc >= 0;
 }
 
-bool tracker_register_device(TrackedDevice *d, uint32_t type, int handle)
+// Registered controllers, for the limit (hardware tests 2026-09-29: with a PS Move and the
+// DualShock 4 registered, the second Move got a colour but never started; so did another
+// user's DualShock 4 next to two Moves).
+static const int MAX_CONTROLLERS = 16;
+static TrackedDevice *g_controllers[MAX_CONTROLLERS];
+static int g_main_user = -1;
+
+void tracker_set_main_user(int user_id)
+{
+    g_main_user = user_id;
+}
+
+// Lower is more important.
+static int controller_rank(uint32_t type, int owner)
+{
+    return (owner == g_main_user ? 0 : 2) + (type == TRACKER_DEVICE_MOVE ? 0 : 1);
+}
+
+void tracker_unregister_device(TrackedDevice *d)
+{
+    for (auto &c : g_controllers)
+        if (c == d)
+            c = nullptr;
+    if (!d->registered)
+        return;
+    auto unreg = (int (*)(int32_t))resolve(g_tracker_module, "sceVrTrackerUnregisterDevice");
+    if (unreg)
+        LOG("sceVrTrackerUnregisterDevice(0x%x) -> 0x%08x", d->handle, (unsigned)unreg(d->handle));
+    d->registered = false;
+}
+
+bool tracker_register_device(TrackedDevice *d, uint32_t type, int handle, int owner)
 {
     memset(d, 0, sizeof(*d));
     d->handle = handle;
     d->type = type;
+    d->owner = owner;
     d->last_rc = 1;
     d->orientation[3] = 1.0f;
     if (!g_state || !g_state->initialized || g_tracker_module < 0 || handle < 0)
@@ -474,20 +506,39 @@ bool tracker_register_device(TrackedDevice *d, uint32_t type, int handle)
     auto reg = (PFN_RegisterDevice)resolve(g_tracker_module, "sceVrTrackerRegisterDevice");
     if (!reg)
         return false;
+    // Room for it: a free place, or the place of a controller of lower priority.
+    int used = 0;
+    TrackedDevice *worst = nullptr;
+    for (TrackedDevice *c : g_controllers)
+        if (c && c->registered) {
+            used++;
+            if (!worst || controller_rank(c->type, c->owner) > controller_rank(worst->type, worst->owner))
+                worst = c;
+        }
+    if (used >= TRACKER_CONTROLLERS) {
+        if (worst && controller_rank(worst->type, worst->owner) > controller_rank(type, owner)) {
+            LOG("tracker: %d controllers tracked, 0x%x (type %u, user 0x%x) makes room for 0x%x (type %u, user 0x%x)",
+                used, worst->handle, worst->type, worst->owner, handle, type, owner);
+            tracker_unregister_device(worst);
+        } else {
+            static int refused_logged = -1;
+            if (refused_logged != handle)
+                LOG("tracker: %d controllers already tracked, 0x%x (type %u, user 0x%x) is not tracked", used, handle,
+                    type, owner);
+            refused_logged = handle;
+            return false;
+        }
+    }
     int rc = reg(type, handle);
-    LOG("sceVrTrackerRegisterDevice(type %u, 0x%x) -> 0x%08x", type, handle, (unsigned)rc);
+    LOG("sceVrTrackerRegisterDevice(type %u, 0x%x, user 0x%x) -> 0x%08x", type, handle, owner, (unsigned)rc);
     d->registered = rc >= 0;
+    if (d->registered)
+        for (auto &c : g_controllers)
+            if (!c) {
+                c = d;
+                break;
+            }
     return d->registered;
-}
-
-void tracker_unregister_device(TrackedDevice *d)
-{
-    if (!d->registered)
-        return;
-    auto unreg = (int (*)(int32_t))resolve(g_tracker_module, "sceVrTrackerUnregisterDevice");
-    if (unreg)
-        LOG("sceVrTrackerUnregisterDevice(0x%x) -> 0x%08x", d->handle, (unsigned)unreg(d->handle));
-    d->registered = false;
 }
 
 volatile uint32_t g_tracker_controller_prediction_us = 0;
@@ -636,10 +687,12 @@ void tracker_recalibrate_all(TrackedDevice *devices, int count)
     if (!g_state || !g_state->initialized)
         return;
     recalibrate(DEVICE_HMD);
-    bool move_done = false;
-    for (int i = 0; i < count; i++)
-        if (devices[i].registered && devices[i].type == TRACKER_DEVICE_MOVE && !move_done) {
-            recalibrate(TRACKER_DEVICE_MOVE);
-            move_done = true;
+    bool done[TRACKER_DEVICE_MOVE + 1] = {};
+    for (int i = 0; i < count; i++) {
+        const uint32_t type = devices[i].type;
+        if (devices[i].registered && type <= TRACKER_DEVICE_MOVE && !done[type]) {
+            recalibrate(type); // once per device type (PS Move, DualShock 4)
+            done[type] = true;
         }
+    }
 }

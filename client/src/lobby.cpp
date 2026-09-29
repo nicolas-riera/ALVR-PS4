@@ -1,6 +1,7 @@
 #include "lobby.h"
 
 #include "move.h"
+#include "pad.h"
 #include "stroke_font.h"
 
 #include <math.h>
@@ -307,6 +308,36 @@ static void rect3d(const EyeTarget &t, Vec3 c, Vec3 a, Vec3 b, uint32_t col)
         line3d(t, p[i], p[(i + 1) % 4], col);
 }
 
+// Battery as four dots like SteamVR's, centred on bc along x (on the face spanned by x and
+// z): red when one or none is left, a bolt on the right while charging.
+static void draw_battery(const EyeTarget &t, Vec3 bc, Vec3 x, Vec3 z, float battery, bool charging)
+{
+    // Nearest number of dots, as SteamVR's gauge (a PS Move at 80 % shows 3).
+    const int dots = (int)lroundf(battery * 4.0f);
+    const float dr = 0.0017f, gap = 0.0052f;
+    const uint32_t on = dots <= 1 ? 0xe04040 : 0xffffff;
+    for (int k = 0; k < 4; k++) {
+        const Vec3 dc = bc + x * ((k - 1.5f) * gap);
+        if (k < dots) {
+            Vec3 poly[8];
+            for (int j = 0; j < 8; j++) {
+                float ang = 6.2831853f * j / 8;
+                poly[j] = to_view(t, dc + x * (dr * cosf(ang)) + z * (dr * sinf(ang)));
+            }
+            fill_poly_view(t, poly, 8, on);
+        } else {
+            circle3d(t, dc, x, z, dr, PIXEL_ALPHA | 0x606060);
+        }
+    }
+    if (charging) {
+        const Vec3 o = bc + x * (2.5f * gap);
+        const uint32_t bolt = PIXEL_ALPHA | 0xffe040;
+        line3d(t, o + x * 0.0012f - z * 0.0028f, o - x * 0.0010f + z * 0.0002f, bolt);
+        line3d(t, o - x * 0.0010f + z * 0.0002f, o + x * 0.0010f - z * 0.0002f, bolt);
+        line3d(t, o + x * 0.0010f - z * 0.0002f, o - x * 0.0012f + z * 0.0028f, bolt);
+    }
+}
+
 // PS Move as wireframe: the sphere as three great circles and a box handle along the
 // local +Z axis (buttons on the +Y face, START on the +X side, SELECT on the -X side).
 static void draw_controller(const EyeTarget &t, const LobbyView::Controller &c)
@@ -334,34 +365,9 @@ static void draw_controller(const EyeTarget &t, const LobbyView::Controller &c)
         draw_text3d(t, o, x, z * -1.0f, lh, txt, PIXEL_ALPHA | 0xffffff);
     }
 
-    // Battery under the letter: four dots like SteamVR's (the Move reports 20 % steps),
-    // red when one or none is left, a bolt on the right while charging.
-    if (c.battery >= 0.0f) {
-        const Vec3 bc = c.pos + z * (r + 0.132f) + y * (hw + 0.002f);
-        const int dots = (int)ceilf(c.battery * 4.0f - 0.001f);
-        const float dr = 0.0017f, gap = 0.0052f;
-        const uint32_t on = dots <= 1 ? 0xe04040 : 0xffffff;
-        for (int k = 0; k < 4; k++) {
-            const Vec3 dc = bc + x * ((k - 1.5f) * gap);
-            if (k < dots) {
-                Vec3 poly[8];
-                for (int j = 0; j < 8; j++) {
-                    float ang = 6.2831853f * j / 8;
-                    poly[j] = to_view(t, dc + x * (dr * cosf(ang)) + z * (dr * sinf(ang)));
-                }
-                fill_poly_view(t, poly, 8, on);
-            } else {
-                circle3d(t, dc, x, z, dr, PIXEL_ALPHA | 0x606060);
-            }
-        }
-        if (c.charging) {
-            const Vec3 o = bc + x * (2.5f * gap);
-            const uint32_t bolt = PIXEL_ALPHA | 0xffe040;
-            line3d(t, o + x * 0.0012f - z * 0.0028f, o - x * 0.0010f + z * 0.0002f, bolt);
-            line3d(t, o - x * 0.0010f + z * 0.0002f, o + x * 0.0010f - z * 0.0002f, bolt);
-            line3d(t, o + x * 0.0010f - z * 0.0002f, o - x * 0.0012f + z * 0.0028f, bolt);
-        }
-    }
+    // Battery under the letter (the Move reports 20 % steps).
+    if (c.battery >= 0.0f)
+        draw_battery(t, c.pos + z * (r + 0.132f) + y * (hw + 0.002f), x, z, c.battery, c.charging);
 
     // Pressed buttons, drawn where they sit (measured on a CECH-ZCM1 photo): the Move button
     // in the middle, square / triangle above left / right, cross / circle below, START on
@@ -406,6 +412,216 @@ static void draw_controller(const EyeTarget &t, const LobbyView::Controller &c)
         Vec3 dot = centre + x * (c.pad_x * pr) + z * (-c.pad_y * pr);
         float dr = c.pad_click ? 0.006f : 0.003f;
         circle3d(t, dot, x, z, dr, PIXEL_ALPHA | (c.pad_click ? 0xffd040 : 0xffffff));
+    }
+}
+
+// DualShock 4 seen from above, right half (x >= 0, z towards the user, metres, origin at the
+// light bar in the middle of the front edge), measured on a product photo (162 mm wide);
+// mirrored for the left half. Few vertices on purpose: blocky, like the PS Move models.
+static const float DS4_OUTLINE[][2] = {
+    {0.0000f, 0.0000f}, {0.0286f, 0.0000f}, {0.0400f, 0.0010f}, {0.0610f, 0.0030f}, {0.0715f, 0.0070f},
+    {0.0785f, 0.0150f}, {0.0812f, 0.0260f}, {0.0815f, 0.0465f}, {0.0795f, 0.0630f}, {0.0762f, 0.0820f},
+    {0.0712f, 0.0945f}, {0.0648f, 0.1005f}, {0.0565f, 0.0995f}, {0.0502f, 0.0925f}, {0.0440f, 0.0780f},
+    {0.0378f, 0.0685f}, {0.0250f, 0.0672f}, {0.0000f, 0.0676f},
+};
+static const int DS4_OUTLINE_N = sizeof(DS4_OUTLINE) / sizeof(DS4_OUTLINE[0]);
+
+// Box from 8 corners: bottom face 0..3, top face 4..7 (same order).
+static void box3d(const EyeTarget &t, const Vec3 p[8], uint32_t col)
+{
+    for (int i = 0; i < 4; i++) {
+        line3d(t, p[i], p[(i + 1) % 4], col);
+        line3d(t, p[4 + i], p[4 + (i + 1) % 4], col);
+        line3d(t, p[i], p[4 + i], col);
+    }
+}
+
+// Prism of a regular polygon (n sides): centre c on the base, axis h (height vector), in
+// the plane of u / v, radius r.
+static void prism3d(const EyeTarget &t, Vec3 c, Vec3 u, Vec3 v, Vec3 h, float r, int n, uint32_t col)
+{
+    for (int i = 0; i < n; i++) {
+        const float a0 = 6.2831853f * (i + 0.5f) / n, a1 = 6.2831853f * (i + 1.5f) / n;
+        const Vec3 p0 = c + u * (r * cosf(a0)) + v * (r * sinf(a0)), p1 = c + u * (r * cosf(a1)) + v * (r * sinf(a1));
+        line3d(t, p0, p1, col);
+        line3d(t, p0 + h, p1 + h, col);
+        line3d(t, p0, p0 + h, col);
+    }
+}
+
+// DualShock 4 as blocky wireframe: the body as a prism of its outline (the grips slope
+// down), a raised touchpad with the light bar in its tracker colour along the front, sticks
+// as octagonal prisms that move with the stick, the D-pad as a cross, the face buttons,
+// L1 / R1 and L2 / R2 as boxes (triggers tilt with the analog value), every button dim and
+// lit while pressed, rumble as waves around the grips, battery dots, and the user number
+// of another user's pad.
+static void draw_pad(const EyeTarget &t, const LobbyView::Pad &p, float time_s)
+{
+    const Vec3 X = rotate(p.rot, v3(1, 0, 0)), Y = rotate(p.rot, v3(0, 1, 0)), Z = rotate(p.rot, v3(0, 0, 1));
+    auto at = [&](float x, float y, float z) { return p.pos + X * x + Y * y + Z * z; };
+    const uint32_t body = PIXEL_ALPHA | (p.tracked ? 0xb0b0b0 : 0x606060), dim = PIXEL_ALPHA | 0x505860;
+    const uint32_t lit = PIXEL_ALPHA | 0xffffff, gold = PIXEL_ALPHA | 0xffd040;
+    // Top and bottom of the body along z: flat over the middle, the grips going down.
+    auto top_y = [](float z) { return 0.004f - (z > 0.060f ? (z - 0.060f) * 0.30f : 0.0f); };
+    auto bottom_y = [](float z) { return -0.022f - (z > 0.045f ? (z - 0.045f) * 0.42f : 0.0f); };
+    const float face = 0.0055f; // the parts on the flat top
+
+    // Body: top and bottom outlines, and every vertical edge.
+    for (int side = -1; side <= 1; side += 2) {
+        for (int i = 0; i < DS4_OUTLINE_N; i++) {
+            const float *a = DS4_OUTLINE[i];
+            const Vec3 ta = at(side * a[0], top_y(a[1]), a[1]), ba = at(side * a[0], bottom_y(a[1]), a[1]);
+            if (a[0] > 0.0f)
+                line3d(t, ta, ba, body);
+            if (i + 1 < DS4_OUTLINE_N) {
+                const float *b = DS4_OUTLINE[i + 1];
+                line3d(t, ta, at(side * b[0], top_y(b[1]), b[1]), body);
+                line3d(t, ba, at(side * b[0], bottom_y(b[1]), b[1]), body);
+            }
+        }
+    }
+
+    // Touchpad (54 x 33 mm) as a low box; clicked: gold. Light bar on its front edge.
+    const float tx = 0.0272f, tz0 = 0.0005f, tz1 = 0.0330f;
+    const bool pad_click = (p.buttons & PAD_BUTTON_TOUCH_PAD) != 0;
+    {
+        const uint32_t c = pad_click ? gold : body;
+        const Vec3 q[8] = {at(-tx, 0.004f, tz0), at(tx, 0.004f, tz0), at(tx, 0.004f, tz1), at(-tx, 0.004f, tz1),
+                           at(-tx, face, tz0),   at(tx, face, tz0),   at(tx, face, tz1),   at(-tx, face, tz1)};
+        box3d(t, q, c);
+        Vec3 lb[4] = {to_view(t, at(-0.022f, 0.0035f, -0.0005f)), to_view(t, at(0.022f, 0.0035f, -0.0005f)),
+                      to_view(t, at(0.022f, -0.004f, -0.0005f)), to_view(t, at(-0.022f, -0.004f, -0.0005f))};
+        fill_poly_view(t, lb, 4, p.tracked ? p.rgb : 0x404040);
+        for (int i = 0; i < 2; i++) {
+            if (!p.touch[i])
+                continue;
+            const Vec3 c2 = at(-tx + 2 * tx * p.touch_x[i], face + 0.0005f, tz0 + (tz1 - tz0) * p.touch_y[i]);
+            circle3d(t, c2, X, Z, 0.0035f, lit);
+            circle3d(t, c2, X, Z, 0.0012f, lit);
+        }
+        if (p.label) {
+            const char txt[2] = {p.label, 0};
+            const float h = 0.012f;
+            draw_text3d(t, at(-lobby_text_width(txt, h) * 0.5f, face + 0.0005f, 0.5f * (tz0 + tz1) + h * 0.5f), X,
+                        Z * -1.0f, h, txt, PIXEL_ALPHA | 0xffffff);
+        }
+    }
+
+    // D-pad: a cross outline, each arm lit while pressed.
+    const float dx = -0.0525f, dz = 0.0271f, arm = 0.0095f, hw = 0.0036f;
+    {
+        struct Arm { uint32_t bit; float ux, uz; };
+        static const Arm arms[4] = {{PAD_BUTTON_UP, 0, -1}, {PAD_BUTTON_RIGHT, 1, 0}, {PAD_BUTTON_DOWN, 0, 1},
+                                    {PAD_BUTTON_LEFT, -1, 0}};
+        for (const Arm &a : arms) {
+            const Vec3 dir = X * a.ux + Z * a.uz, side = X * -a.uz + Z * a.ux;
+            const Vec3 c = at(dx, face, dz);
+            const uint32_t col = (p.buttons & a.bit) ? lit : dim;
+            const Vec3 in0 = c + dir * hw + side * hw, in1 = c + dir * hw - side * hw;
+            const Vec3 out0 = c + dir * arm + side * hw, out1 = c + dir * arm - side * hw;
+            line3d(t, in0, out0, col);
+            line3d(t, out0, out1, col);
+            line3d(t, out1, in1, col);
+        }
+    }
+
+    // Face buttons around (55, 27) mm: triangle up, circle right, cross down, square left.
+    const float bx = 0.0551f, bz = 0.0265f, off = 0.0121f, br = 0.0056f, s = 0.0034f;
+    const Vec3 fwd = Z * -1.0f; // "up" on the face, towards the light bar
+    const Vec3 tri = at(bx, face, bz - off), cir = at(bx + off, face, bz), crs = at(bx, face, bz + off),
+               sqr = at(bx - off, face, bz);
+    const bool on_tri = p.buttons & PAD_BUTTON_TRIANGLE, on_cir = p.buttons & PAD_BUTTON_CIRCLE,
+               on_crs = p.buttons & PAD_BUTTON_CROSS, on_sqr = p.buttons & PAD_BUTTON_SQUARE;
+    prism3d(t, tri, X, Z, Y * 0.002f, br, 8, on_tri ? lit : dim);
+    prism3d(t, cir, X, Z, Y * 0.002f, br, 8, on_cir ? lit : dim);
+    prism3d(t, crs, X, Z, Y * 0.002f, br, 8, on_crs ? lit : dim);
+    prism3d(t, sqr, X, Z, Y * 0.002f, br, 8, on_sqr ? lit : dim);
+    const Vec3 up2 = Y * 0.0021f;
+    symbol_triangle(t, tri + up2, X, fwd, s, PIXEL_ALPHA | (on_tri ? 0x40e0a0 : 0x306050));
+    circle3d(t, cir + up2, X, Z, s * 0.85f, PIXEL_ALPHA | (on_cir ? 0xff5050 : 0x703030));
+    symbol_cross(t, crs + up2, X, fwd, s, PIXEL_ALPHA | (on_crs ? 0x60a0ff : 0x304870));
+    symbol_square(t, sqr + up2, X, fwd, s, PIXEL_ALPHA | (on_sqr ? 0xff80d0 : 0x703860));
+
+    // Sticks: an octagonal base ring and a cap prism moved by the stick (L3 / R3: gold).
+    for (int side = -1; side <= 1; side += 2) {
+        const float sx = side < 0 ? p.lx : p.rx, sy = side < 0 ? p.ly : p.ry;
+        const bool click = (p.buttons & (side < 0 ? PAD_BUTTON_L3 : PAD_BUTTON_R3)) != 0;
+        const Vec3 base = at(side * 0.0263f, face, 0.0490f);
+        prism3d(t, base, X, Z, Y * 0.0015f, 0.0125f, 8, dim);
+        const Vec3 cap = base + X * (sx * 0.0045f) + fwd * (sy * 0.0045f) + Y * (click ? 0.003f : 0.005f);
+        const bool moved = sx * sx + sy * sy > 0.01f;
+        prism3d(t, cap, X, Z, Y * 0.004f, 0.0088f, 8, click ? gold : moved ? lit : body);
+    }
+
+    // SHARE (not reported to apps), OPTIONS (lit while pressed), PS button, speaker.
+    for (int side = -1; side <= 1; side += 2) {
+        const bool on = side > 0 && (p.buttons & PAD_BUTTON_OPTIONS);
+        const Vec3 c = at(side * 0.0360f, face, 0.0092f);
+        const Vec3 q[8] = {c - X * 0.0019f - Z * 0.0032f, c + X * 0.0019f - Z * 0.0032f, c + X * 0.0019f + Z * 0.0032f,
+                           c - X * 0.0019f + Z * 0.0032f, c - X * 0.0019f - Z * 0.0032f + Y * 0.0015f,
+                           c + X * 0.0019f - Z * 0.0032f + Y * 0.0015f, c + X * 0.0019f + Z * 0.0032f + Y * 0.0015f,
+                           c - X * 0.0019f + Z * 0.0032f + Y * 0.0015f};
+        box3d(t, q, on ? lit : dim);
+    }
+    prism3d(t, at(0, face, 0.0506f), X, Z, Y * 0.0012f, 0.0032f, 6, dim);
+
+    // L1 / R1 on the front corners, L2 / R2 under them tilting in with the analog value.
+    for (int side = -1; side <= 1; side += 2) {
+        const bool l1 = (p.buttons & (side < 0 ? PAD_BUTTON_L1 : PAD_BUTTON_R1)) != 0;
+        const float x0 = side * 0.0420f, x1 = side * 0.0660f;
+        const Vec3 q[8] = {at(x0, 0.000f, -0.0040f), at(x1, 0.000f, -0.0040f), at(x1, 0.000f, 0.0030f),
+                           at(x0, 0.000f, 0.0030f),  at(x0, 0.005f, -0.0040f), at(x1, 0.005f, -0.0040f),
+                           at(x1, 0.005f, 0.0030f),  at(x0, 0.005f, 0.0030f)};
+        box3d(t, q, l1 ? lit : dim);
+        // Trigger: a box hinged at its top, swinging from sticking out (released) inwards.
+        const float v = side < 0 ? p.l2 : p.r2;
+        const float a = (25.0f + 50.0f * v) * 0.0174533f;
+        const Vec3 hinge = at(side * 0.054f, -0.003f, 0.004f);
+        const Vec3 down = Z * -cosf(a) + Y * -sinf(a); // from the hinge to the tip
+        const Vec3 thick = Z * sinf(a) * 0.004f + Y * -cosf(a) * 0.004f;
+        const Vec3 half = X * 0.0105f;
+        const Vec3 tip = hinge + down * 0.020f;
+        const Vec3 tq[8] = {hinge - half, hinge + half, tip + half, tip - half,
+                            hinge - half + thick, hinge + half + thick, tip + half + thick, tip - half + thick};
+        const uint32_t tc = v >= 0.9f ? gold : PIXEL_ALPHA | (v > 0.02f ? grey(0.45f + 0.55f * v) & 0xffffff : 0x505860);
+        box3d(t, tq, tc);
+    }
+
+    // Rumble: waves spreading out of each grip, more and wider with the motor strength
+    // (large motor in the left grip, small one in the right grip).
+    for (int side = -1; side <= 1; side += 2) {
+        const float m = side < 0 ? p.rumble_large : p.rumble_small;
+        if (m <= 0.02f)
+            continue;
+        const Vec3 c = at(side * 0.064f, -0.020f, 0.094f);
+        const float phase = time_s * (side < 0 ? 6.0f : 11.0f);
+        const int waves = 1 + (int)(m * 2.99f);
+        for (int k = 0; k < waves; k++) {
+            float f = phase + k / (float)waves;
+            f -= floorf(f);
+            const float r = 0.014f + f * (0.010f + 0.012f * m);
+            const uint32_t col = PIXEL_ALPHA | (grey((1.0f - f) * (0.4f + 0.6f * m)) & 0xffffff);
+            const Vec3 u = X * (float)side, w = Z;
+            Vec3 prev = c + (u * cosf(-1.2f) + w * sinf(-1.2f)) * r;
+            for (int j = 1; j <= 8; j++) {
+                const float ang = -1.2f + 2.4f * j / 8;
+                Vec3 q = c + (u * cosf(ang) + w * sinf(ang)) * r;
+                line3d(t, prev, q, col);
+                prev = q;
+            }
+        }
+    }
+
+    // Battery where the speaker is, between the touchpad and the PS button.
+    if (p.battery >= 0.0f)
+        draw_battery(t, at(0, face, 0.0395f), X, Z, p.battery, p.charging);
+
+    // Not tracked: said in front of it, on the plane of its top face.
+    if (p.floating) {
+        const char *txt = "Not tracked";
+        const float h = 0.0085f;
+        draw_text3d(t, at(-lobby_text_width(txt, h) * 0.5f, face, -0.012f), X, Z * -1.0f, h, txt,
+                    PIXEL_ALPHA | 0xa0a8b0);
     }
 }
 
@@ -503,6 +719,9 @@ void lobby_render_eye(uint32_t *pixels, int width, int height, int pitch, const 
         for (auto &c : view->controllers)
             if (c.visible)
                 draw_controller(t, c);
+        for (auto &p : view->pads)
+            if (p.visible)
+                draw_pad(t, p, view->time_s);
         for (auto &ptr : view->pointers)
             if (ptr.visible)
                 draw_pointer(t, ptr, view->panel);

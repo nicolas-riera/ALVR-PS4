@@ -7,7 +7,7 @@ Applies every setting the PS4 client needs (see README.md, "ALVR streamer settin
     resolution (1248x1408 per eye) the PS4 decodes a 1920x1056 frame, the size its decoder
     handles quickly (above it, decoding took up to 17 ms per frame in busy scenes);
   - headset identity (PlayStation VR, same tracking system and universe as the controllers);
-  - encoder quality: the "Quality" preset (NVENC P4) at 60 Mbps instead of the fastest
+  - encoder quality: the "Quality" preset (NVENC P4) at 80 Mbps instead of the fastest
     preset at 30 Mbps, which blurred text (the PC's GPU pays for it, not the PS4);
   - game audio on; with --mic, the microphone too (needs VB-Audio Virtual Cable on the PC);
   - stream over UDP;
@@ -35,7 +35,7 @@ if not ARGS:
     sys.exit(__doc__)
 SESSION = ARGS[0]
 MIC = "--mic" in sys.argv
-BITRATE_MBPS = 60
+BITRATE_MBPS = 80  # user choice (100 was too much); the PS4 decodes 90 fps up to ~130 Mbps (video bench)
 FOVEATION = {
     "center_size_x": 0.5,
     "center_size_y": 0.5,
@@ -150,7 +150,7 @@ def main():
     fov = video["foveated_encoding"]
     fov["enabled"] = True
     fov["content"].update(FOVEATION)
-    video["preferred_fps"] = 60.0
+    video["preferred_fps"] = 90.0  # the PS4 client offers only its own rate (90 by default)
     enc = video["encoder_config"]
     enc["quality_preset"]["variant"] = "Quality"
     enc["nvenc"]["quality_preset"]["variant"] = "P4"

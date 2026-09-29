@@ -42,6 +42,7 @@ enum TrackerDeviceType : uint32_t {
 struct TrackedDevice {
     int handle;
     uint32_t type;
+    int owner;       // user id the controller belongs to
     bool registered;
     int last_rc;
     uint32_t status, position_quality, orientation_quality, led_color;
@@ -79,8 +80,15 @@ void tracker_run_thread();
 void tracker_stop(int tracker_module, int camera_module);
 // The headset was reopened with a new handle: unregisters the old one, registers it.
 bool tracker_reregister_hmd(int hmd_handle);
-// Registers a controller with the tracker (after tracker_start).
-bool tracker_register_device(TrackedDevice *d, uint32_t type, int handle);
+// Registers a controller with the tracker (after tracker_start). The tracker runs only
+// TRACKER_CONTROLLERS controllers in all (a third one, of any user, gets a colour but stays
+// NOT_STARTED). Priority: the playing user's PS Moves, then their DualShock 4, then other
+// users' Moves, then their DualShock 4. A controller takes the place of a registered one of
+// lower priority (unregistered); otherwise it is refused (false) and retried by the caller.
+#define TRACKER_CONTROLLERS 2
+bool tracker_register_device(TrackedDevice *d, uint32_t type, int handle, int owner);
+// The user playing (their controllers come first).
+void tracker_set_main_user(int user_id);
 void tracker_unregister_device(TrackedDevice *d);
 // Reads the controller's latest result (call once per rendered frame).
 void tracker_update_device(TrackedDevice *d);

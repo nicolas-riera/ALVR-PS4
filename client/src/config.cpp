@@ -17,6 +17,7 @@ void config_load(ClientConfig *cfg)
     cfg->resolution_percent = 130; // 1248x1404 per eye; foveated encoding keeps the decoded frame at 1920x1056
     cfg->controller_prediction_ms = 0;
     cfg->center_on_connect = 1;
+    cfg->refresh_rate = 90;
     FILE *f = fopen(CONFIG_PATH, "r");
     if (f) {
         char line[128];
@@ -33,6 +34,8 @@ void config_load(ClientConfig *cfg)
                 continue;
             if (sscanf(line, "center_on_steamvr_start=%d", &cfg->center_on_connect) == 1)
                 continue;
+            if (sscanf(line, "refresh_rate_hz=%d", &cfg->refresh_rate) == 1)
+                continue;
         }
         fclose(f);
     }
@@ -45,10 +48,12 @@ void config_load(ClientConfig *cfg)
     if (cfg->user_height_cm < 100 || cfg->user_height_cm > 230)
         cfg->user_height_cm = 0;
     cfg->center_on_connect = cfg->center_on_connect != 0;
+    if (cfg->refresh_rate != 60 && cfg->refresh_rate != 90)
+        cfg->refresh_rate = 90;
     if (cfg->hostname[0]) {
-        LOG("config: hostname %s, resolution %d%%, extra controller prediction %d ms, camera height %d cm, user height %d cm "
-            "(from %s)", cfg->hostname, cfg->resolution_percent, cfg->controller_prediction_ms, cfg->camera_height_cm,
-            cfg->user_height_cm, CONFIG_PATH);
+        LOG("config: hostname %s, resolution %d%%, %d Hz, extra controller prediction %d ms, camera height %d cm, "
+            "user height %d cm (from %s)", cfg->hostname, cfg->resolution_percent, cfg->refresh_rate,
+            cfg->controller_prediction_ms, cfg->camera_height_cm, cfg->user_height_cm, CONFIG_PATH);
         config_store(cfg); // writes keys added by newer versions
         return;
     }
@@ -74,5 +79,6 @@ void config_store(const ClientConfig *cfg)
     fprintf(f, "camera_height_cm=%d\n", cfg->camera_height_cm);
     fprintf(f, "user_height_cm=%d\n", cfg->user_height_cm);
     fprintf(f, "center_on_steamvr_start=%d\n", cfg->center_on_connect);
+    fprintf(f, "refresh_rate_hz=%d\n", cfg->refresh_rate);
     fclose(f);
 }

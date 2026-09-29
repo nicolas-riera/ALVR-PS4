@@ -21,5 +21,6 @@ int screen_text(Screen *s, int x, int y, const char *txt, uint32_t rgb);
 void screen_flip(Screen *s);
 // Registers two extra tiled 1920x1080 buffers, used as reprojection output.
 bool screen_register_vr_buffers(Screen *s, int first_index);
-// Switches the video output to the PSVR mode (119.88 Hz), as VR games do.
-bool screen_set_vr_output_mode(Screen *s, int videoout_module);
+// Switches the video output to the PSVR mode, as VR games do: *hz is 90 (89.91 Hz) or
+// 120 (119.88 Hz) on input; on return, the rate in use (90 falls back to 120).
+bool screen_set_vr_output_mode(Screen *s, int videoout_module, int *hz);

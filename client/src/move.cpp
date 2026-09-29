@@ -1,11 +1,10 @@
 #include "move.h"
 
-#include <fcntl.h>
 #include <string.h>
-#include <sys/ioctl.h>
 
 #include <orbis/libkernel.h>
 
+#include "hid.h"
 #include "log.h"
 
 // Structures follow shadPS4 (src/core/libraries/move/move.h).
@@ -49,44 +48,14 @@ static void *resolve(int module, const char *name)
     return fn;
 }
 
-// Raw HID input reports, as libSceMove reads them (reference/decomp/move_battery.c): the
-// Move handle is the HID handle; each entry is a timestamp, a kernel flag byte, then the PS
-// Move input report (report id at data[1], battery at data[0x0d]). Reports are consumed
-// when read, so polling steals one sample from libSceMove: done only every 5 s.
-struct HidReport {
-    uint64_t timestamp_us;
-    uint8_t data[0x38];
-};
-
-struct HidReadReports {
-    uint32_t handle;
-    uint32_t pad0;
-    HidReport *reports;
-    uint32_t max_reports;
-    uint32_t pad1;
-    int32_t *device_id;
-};
-static_assert(sizeof(HidReadReports) == 0x20, "ioctl 0xc0204834 argument size");
-
+// Raw HID input reports (hid.h): the Move handle is the HID handle; the PS Move input
+// report has its id at data[1] and the battery at data[0x0d]. Reports are consumed when
+// read, so polling steals one sample from libSceMove: done only every 5 s.
 static int read_battery(int index, int handle)
 {
-    static int fd = -2;
-    if (fd == -2) {
-        fd = open("/dev/hid", O_RDONLY);
-        LOG("move: open(/dev/hid) -> %d", fd);
-    }
-    if (fd < 0)
-        return -1;
     HidReport rep;
     int32_t device_id = 0;
-    HidReadReports req;
-    memset(&req, 0, sizeof(req));
-    memset(&rep, 0, sizeof(rep));
-    req.handle = (uint32_t)handle;
-    req.reports = &rep;
-    req.max_reports = 1;
-    req.device_id = &device_id;
-    int n = ioctl(fd, 0xc0204834, &req);
+    int n = hid_read_report(handle, &rep, &device_id);
     static bool logged[MOVE_MAX];
     if (!logged[index] && n > 0) {
         logged[index] = true;
@@ -133,20 +102,29 @@ void move_start(int module, int user_id, MoveController ctl[MOVE_MAX])
     }
     if (module < 0)
         return;
-    auto init = (PFN_Init)resolve(module, "sceMoveInit");
-    auto open = (PFN_Open)resolve(module, "sceMoveOpen");
-    p_get_info = (PFN_GetDeviceInfo)resolve(module, "sceMoveGetDeviceInfo");
-    p_read_latest = (PFN_ReadStateLatest)resolve(module, "sceMoveReadStateLatest");
-    p_set_sphere = (PFN_SetLightSphere)resolve(module, "sceMoveSetLightSphere");
-    p_set_vibration = (PFN_SetVibration)resolve(module, "sceMoveSetVibration");
-    if (!init || !open || !p_get_info || !p_read_latest || !p_set_sphere)
+    static PFN_Open open;
+    static bool initialized;
+    if (!initialized) {
+        initialized = true;
+        auto init = (PFN_Init)resolve(module, "sceMoveInit");
+        open = (PFN_Open)resolve(module, "sceMoveOpen");
+        p_get_info = (PFN_GetDeviceInfo)resolve(module, "sceMoveGetDeviceInfo");
+        p_read_latest = (PFN_ReadStateLatest)resolve(module, "sceMoveReadStateLatest");
+        p_set_sphere = (PFN_SetLightSphere)resolve(module, "sceMoveSetLightSphere");
+        p_set_vibration = (PFN_SetVibration)resolve(module, "sceMoveSetVibration");
+        if (!init || !open || !p_get_info || !p_read_latest || !p_set_sphere) {
+            open = nullptr;
+            return;
+        }
+        LOG("sceMoveInit -> 0x%08x", (unsigned)init());
+    }
+    if (!open)
         return;
-    int rc = init();
-    LOG("sceMoveInit -> 0x%08x", (unsigned)rc);
-
+    int rc;
     for (int i = 0; i < MOVE_MAX; i++) {
+        ctl[i].owner = user_id;
         int h = open(user_id, 0, i);
-        LOG("sceMoveOpen(index %d) -> 0x%08x", i, (unsigned)h);
+        LOG("sceMoveOpen(user 0x%x, index %d) -> 0x%08x", user_id, i, (unsigned)h);
         if (h < 0)
             continue;
         ctl[i].handle = h;
@@ -186,13 +164,14 @@ void move_update(MoveController ctl[MOVE_MAX])
         int rc = p_read_latest(c.handle, &d);
         bool connected = rc == 0;
         if (connected != c.connected) {
-            LOG("move %d: %s (ReadStateLatest 0x%08x)", i, connected ? "connected" : "disconnected", (unsigned)rc);
+            LOG("move %d of user 0x%x: %s (ReadStateLatest 0x%08x)", i, c.owner, connected ? "connected" : "disconnected",
+                (unsigned)rc);
             c.connected = connected;
             c.battery_raw = -1;
             c.next_battery_us = now;
         }
         if (connected && !c.track.registered && now >= c.next_register_us) {
-            if (!tracker_register_device(&c.track, TRACKER_DEVICE_MOVE, c.handle))
+            if (!tracker_register_device(&c.track, TRACKER_DEVICE_MOVE, c.handle, c.owner))
                 c.next_register_us = now + 2000000; // retry in 2 s
         }
         else if (!connected && c.track.registered)

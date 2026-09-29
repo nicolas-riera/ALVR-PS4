@@ -26,6 +26,7 @@
 #include "alvr_client.h"
 #include "config.h"
 #include "move.h"
+#include "pad.h"
 #include "wand.h"
 #include "reproj.h"
 #include "log.h"
@@ -33,6 +34,7 @@
 #include "tracker.h"
 #include "audio.h"
 #include "video.h"
+#include "bench.h"
 
 #define ALVR_PS4_VERSION "0.9.3"
 #if ALVR_PS4_DEV
@@ -124,6 +126,17 @@ static TrackerState g_tracker;
 static MoveController g_moves[MOVE_MAX];
 static WandEmulator g_wand_emu[MOVE_MAX];
 static WandInput g_wand[MOVE_MAX];
+static PadController g_pad; // DualShock 4: lobby only
+// Other logged-in users: their controllers are opened and tracked too (the tracker runs two
+// controllers per user), and shown in the lobby only.
+struct OtherUser {
+    int user;
+    MoveController moves[MOVE_MAX];
+    PadController pad;
+};
+static const int OTHER_USERS = 3;
+static OtherUser g_others[OTHER_USERS];
+static int g_other_count;
 static ClientConfig g_config;
 static bool g_floor_set = false; // cleared by a tracking reset: the tracker origin may move
 static float g_floor_y = -1.4f;   // tracker-space floor height, shared with the ALVR uplink
@@ -145,6 +158,9 @@ static bool g_lobby_shown = false;             // the last frame was the lobby
 static bool g_wizard_pending = false; // also after a settings Reset
 static bool g_alvr_started = false;
 static void start_alvr();
+// PSVR refresh rate in use (90, or 120 for the 60 fps stream) and the stream's frame rate.
+static int g_display_hz = 120;
+static int stream_fps() { return g_display_hz == 90 ? 90 : 60; }
 
 static void init_user()
 {
@@ -163,29 +179,19 @@ static void start_headset()
     else
         LOG("headset open FAILED");
 
+    tracker_set_main_user(g_user_id);
     if (tracker_start(g_probes[1].handle, g_probes[4].handle, g_hmd.handle, &g_tracker))
         LOG("tracker started, HMD registered");
     else
         LOG("tracker start FAILED");
     move_start(g_probes[2].handle, g_user_id, g_moves);
+    // The DualShock 4 is tracked too (light bar), for the lobby only.
+    pad_start(g_user_id, &g_pad);
     tracker_run_thread();
     if (!video_init(g_probes[5].handle))
         LOG("video decoder unavailable");
     if (!audio_init(g_probes[6].handle, g_probes[7].handle, g_user_id, alvr_send_microphone))
         LOG("audio unavailable");
-    g_wizard_pending = g_config.user_height_cm <= 0;
-    if (g_wizard_pending)
-        LOG("first launch: the PC is searched for once the height is confirmed");
-    else
-        start_alvr();
-
-    // The DualShock 4 is not used: not registered with the tracker, light bar reset
-    // to the system's generic colour.
-    int rc_pad = scePadInit();
-    int pad = scePadOpen(g_user_id, 0, 0, nullptr);
-    LOG("scePadInit -> 0x%08x, scePadOpen -> 0x%08x", (unsigned)rc_pad, (unsigned)pad);
-    if (pad >= 0)
-        LOG("scePadResetLightBar -> 0x%08x", (unsigned)scePadResetLightBar(pad));
 }
 
 // System service: there is no "about to close" event for apps, the system kills the
@@ -222,10 +228,17 @@ static void poll_system_events()
     if (last.is_in_background_execution && !st.is_in_background_execution) {
         // Back from the PS menu: reset the tracking (gyro drift), as some games do.
         LOG("back from the PS menu: recalibrating the tracking");
-        TrackedDevice devs[MOVE_MAX];
+        TrackedDevice devs[(MOVE_MAX + 1) * (1 + OTHER_USERS)];
+        int n = 0;
         for (int i = 0; i < MOVE_MAX; i++)
-            devs[i] = g_moves[i].track;
-        tracker_recalibrate_all(devs, MOVE_MAX);
+            devs[n++] = g_moves[i].track;
+        devs[n++] = g_pad.track;
+        for (int k = 0; k < g_other_count; k++) {
+            for (int i = 0; i < MOVE_MAX; i++)
+                devs[n++] = g_others[k].moves[i].track;
+            devs[n++] = g_others[k].pad.track;
+        }
+        tracker_recalibrate_all(devs, n);
         g_floor_set = false;
         // The headset counts as not initialized until the camera sees it again (stale
         // results from before the recalibration are ignored).
@@ -422,7 +435,7 @@ static bool render_video()
     static unsigned shown;
     unsigned &last_seq = g_video_shown_seq;
     // Motion-to-photon: from the tracking sample a frame was rendered with to its display
-    // (next compositor vsync, ~8 ms after submission). Logged only: predicting all of it
+    // (next compositor vsync, about one refresh period after submission). Logged only: predicting all of it
     // on top of SteamVR's own extrapolation (2.1 frames, with the velocities) was too
     // much. The optional extra prediction comes from config.txt.
     static uint64_t m2p_avg_us;
@@ -432,8 +445,9 @@ static bool render_video()
         shown++;
         last_seq = vf.seq;
         uint64_t sample_us = vf.timestamp_ns / 1000;
-        if (sample_us && now + 8000 > sample_us && now + 8000 - sample_us < 500000) {
-            uint64_t m2p = now + 8000 - sample_us;
+        const uint64_t vsync = 1000000 / g_display_hz;
+        if (sample_us && now + vsync > sample_us && now + vsync - sample_us < 500000) {
+            uint64_t m2p = now + vsync - sample_us;
             m2p_avg_us = m2p_avg_us ? (m2p_avg_us * 31 + m2p) / 32 : m2p;
         }
     }
@@ -442,15 +456,69 @@ static bool render_video()
     if (now - stat_start >= 5000000) {
         VideoStats vs;
         video_get_stats(&vs);
-        LOG("video: %.1f fps, rx %u dec %u drop %u err %u, decode %.1f ms (cpu %.1f), %.0f KB/frame, convert %.1f ms, "
+        LOG("video: %.1f fps, rx %u dec %u drop %u lost %u err %u, decode %.1f ms (cpu %.1f), %.0f KB/frame, convert %.1f ms, "
             "queue %u, m2p %.0f ms",
-            shown * 1e6 / (double)(now - stat_start), vs.received, vs.decoded, vs.dropped, vs.errors,
+            shown * 1e6 / (double)(now - stat_start), vs.received, vs.decoded, vs.dropped, vs.lost, vs.errors,
             vs.decode_us_avg / 1000.0, vs.decode_cpu_us_avg / 1000.0, vs.bytes_avg / 1024.0, vs.convert_us_avg / 1000.0,
             vs.queue_max, m2p_avg_us / 1000.0);
         stat_start = now;
         shown = 0;
     }
     return ok;
+}
+
+// Lobby model of a PS Move (always shown while tracked; the 10 s "searching" state is only
+// for SteamVR). The emulated trackpad is filled by the caller.
+static void fill_lobby_move(LobbyView::Controller *c, const MoveController &m, char letter)
+{
+    c->visible = m.connected && m.track.registered && m.track.has_position;
+    c->pos = v3(m.track.position[0], m.track.position[1], m.track.position[2]);
+    c->rot = Quat{m.track.orientation[0], m.track.orientation[1], m.track.orientation[2], m.track.orientation[3]};
+    c->rgb = move_led_rgb(m.track.led_color);
+    c->tracked = m.track.position_quality == 9 || m.track.position_quality == 6;
+    c->hand_letter = letter;
+    c->buttons = m.connected ? m.buttons : 0;
+    c->trigger = m.connected ? m.trigger / 255.0f : 0.0f;
+    c->battery = -1.0f;
+    move_battery(m, &c->battery, &c->charging);
+}
+
+// A DualShock 4 that is connected but not tracked (the tracker runs two controllers, the
+// PS Moves first) is shown still, in grey, in front of the play area, so its buttons can
+// still be seen; `slot` spreads several of them.
+static void fill_lobby_pad(LobbyView::Pad *d, const PadController &p, char label, int slot)
+{
+    const TrackedDevice &tr = p.track;
+    const bool tracked = tr.registered && tr.has_position;
+    d->visible = p.connected;
+    d->floating = !tracked;
+    if (tracked) {
+        d->pos = v3(tr.position[0], tr.position[1], tr.position[2]);
+        d->rot = Quat{tr.orientation[0], tr.orientation[1], tr.orientation[2], tr.orientation[3]};
+    } else {
+        const float tilt = 0.70f; // top face turned towards the user (radians)
+        d->pos = v3(g_center_x + (slot - 0.5f * (LOBBY_PADS - 1)) * 0.25f, g_floor_y + 1.0f, g_center_z - 0.55f);
+        d->rot = Quat{sinf(tilt / 2), 0, 0, cosf(tilt / 2)};
+    }
+    d->rgb = move_led_rgb(tr.led_color);
+    d->tracked = tracked && (tr.position_quality == 9 || tr.position_quality == 6);
+    d->buttons = p.buttons;
+    d->lx = p.lx;
+    d->ly = p.ly;
+    d->rx = p.rx;
+    d->ry = p.ry;
+    d->l2 = p.l2;
+    d->r2 = p.r2;
+    for (int k = 0; k < 2; k++) {
+        d->touch[k] = p.touch[k].down;
+        d->touch_x[k] = p.touch[k].x;
+        d->touch_y[k] = p.touch[k].y;
+    }
+    d->battery = -1.0f;
+    pad_battery(p, &d->battery, &d->charging);
+    d->rumble_large = p.vib_large / 255.0f;
+    d->rumble_small = p.vib_small / 255.0f;
+    d->label = label;
 }
 
 // Stereo lobby, rendered in software into the side-by-side buffer and handed to the
@@ -496,46 +564,56 @@ static bool render_lobby(Screen *s)
     view.floor_y = floor_y;
     view.center_x = g_center_x;
     view.center_z = g_center_z;
-    SettingsRay rays[2];
+    SettingsRay rays[LOBBY_POINTERS];
+    memset(rays, 0, sizeof(rays));
     for (int i = 0; i < MOVE_MAX; i++) {
-        const MoveController &m = g_moves[i];
         LobbyView::Controller &c = view.controllers[i];
-        // Always shown in the lobby; the 10 s "searching" state is only for SteamVR.
-        c.visible = m.connected && m.track.has_position;
-        c.pos = v3(m.track.position[0], m.track.position[1], m.track.position[2]);
-        c.rot = Quat{m.track.orientation[0], m.track.orientation[1], m.track.orientation[2], m.track.orientation[3]};
-        c.rgb = move_led_rgb(m.track.led_color);
-        c.tracked = m.track.position_quality == 9 || m.track.position_quality == 6;
         const WandInput &w = g_wand[i];
-        c.hand_letter = move_index_hand(i) == HAND_LEFT ? 'L' : 'R';
+        fill_lobby_move(&c, g_moves[i], move_index_hand(i) == HAND_LEFT ? 'L' : 'R');
         c.pad_touch = w.pad_touch;
         c.pad_click = w.pad_click;
         c.pad_x = w.pad_x;
         c.pad_y = w.pad_y;
-        c.buttons = m.connected ? m.buttons : 0;
-        c.trigger = m.connected ? m.trigger / 255.0f : 0.0f;
-        c.battery = -1.0f;
-        move_battery(m, &c.battery, &c.charging);
         // Settings laser: from the sphere along the controller's forward (-Z).
-        rays[i].valid = c.visible && m.track.has_orientation;
+        rays[i].valid = c.visible && g_moves[i].track.has_orientation;
         rays[i].origin = c.pos;
         rays[i].dir = rotate(c.rot, v3(0, 0, -1));
         rays[i].trigger = c.trigger;
     }
+    // DualShock 4: laser from the light bar along the pad's forward (-Z), Cross clicks.
+    {
+        LobbyView::Pad &d = view.pads[0];
+        fill_lobby_pad(&d, g_pad, 0, 0);
+        SettingsRay &r = rays[MOVE_MAX];
+        r.valid = d.visible && !d.floating && g_pad.track.has_orientation;
+        r.origin = d.pos;
+        r.dir = rotate(d.rot, v3(0, 0, -1));
+        r.trigger = (g_pad.buttons & PAD_BUTTON_CROSS) ? 1.0f : 0.0f;
+    }
+    // Other users' controllers, labelled with the user number (no lasers).
+    for (int k = 0; k < g_other_count && k < OTHER_USERS; k++) {
+        const char label = (char)('2' + k);
+        for (int i = 0; i < MOVE_MAX; i++)
+            fill_lobby_move(&view.controllers[MOVE_MAX * (k + 1) + i], g_others[k].moves[i], label);
+        fill_lobby_pad(&view.pads[k + 1], g_others[k].pad, label, k + 1);
+    }
+    view.time_s = now / 1e6f;
 
     // Settings panel (START in the lobby), or the first launch wizard.
     static LobbyPanel panel;
     if (g_wizard_pending && !settings_is_open() && !headset_lost(now))
         settings_open_wizard(v3(hp[0], hp[1], hp[2]));
     if (settings_is_open()) {
-        int moves_on = 0;
+        int pointers_on = g_pad.connected && g_pad.track.registered;
         for (int i = 0; i < MOVE_MAX; i++)
-            moves_on += g_moves[i].connected;
-        SettingsContext ctx{&g_config, floor_y, hp[1], moves_on};
+            pointers_on += g_moves[i].connected;
+        SettingsContext ctx{&g_config, floor_y, hp[1], pointers_on};
         int clicked = -1;
         unsigned actions = settings_update(ctx, rays, now, &clicked);
-        if (clicked >= 0 && lobby_haptics_allowed())
+        if (clicked >= 0 && clicked < MOVE_MAX && lobby_haptics_allowed())
             move_vibrate(&g_moves[clicked], 150, 30);
+        else if (clicked == MOVE_MAX && lobby_haptics_allowed())
+            pad_vibrate(&g_pad, 0, 160, 40);
         if (actions & SETTINGS_HEIGHT_CHANGED)
             g_floor_y = -g_config.camera_height_cm / 100.0f;
         if (actions & SETTINGS_RESET) {
@@ -596,7 +674,8 @@ static bool render_lobby(Screen *s)
     snprintf(info_lines[2], sizeof(info_lines[2]), "Hostname: %s", g_config.hostname);
     snprintf(info_lines[3], sizeof(info_lines[3]), "IP: %s", g_ip);
     snprintf(info_lines[4], sizeof(info_lines[4]), "Client v%s", ALVR_PS4_VERSION);
-    snprintf(info_lines[5], sizeof(info_lines[5]), "%s", g_wizard_pending ? "" : "Press Start to open settings");
+    snprintf(info_lines[5], sizeof(info_lines[5]), "%s",
+             g_wizard_pending ? "" : "Press Start (PS Move) or Options (DualShock 4) to open settings");
     for (int i = 0; i < 6; i++)
         view.info[i] = info_lines[i];
     view.info[6] = nullptr;
@@ -683,6 +762,7 @@ static void start_alvr()
     views.view_width = (uint32_t)(960 * g_config.resolution_percent / 100);
     views.view_height = (uint32_t)(1080 * g_config.resolution_percent / 100);
     views.ipd_m = 0.063f;
+    views.fps = (float)stream_fps();
     const HmdFieldOfView &f = g_hmd.fov;
     // OpenXR angle convention: left and down negative.
     const float l[2] = {f.tan_out, f.tan_in}, r[2] = {f.tan_in, f.tan_out};
@@ -854,13 +934,66 @@ static void monitor_headset(unsigned frame, uint64_t now)
     }
 }
 
-// START on either Move opens / closes the settings in the lobby (not while the lobby is
-// black: headset not detected). While streaming, START is SteamVR's system button.
+// Other users logged in on the console (checked every 3 s): their PS Moves and DualShock 4
+// are opened and tracked like the playing user's, within the tracker's per-user limit.
+static void poll_other_users(uint64_t now)
+{
+    static uint64_t next_us;
+    if (now < next_us)
+        return;
+    next_us = now + 3000000;
+    OrbisUserServiceLoginUserIdList list;
+    memset(&list, 0xff, sizeof(list));
+    if (sceUserServiceGetLoginUserIdList(&list) < 0)
+        return;
+    for (int i = 0; i < ORBIS_USER_SERVICE_MAX_LOGIN_USERS; i++) {
+        const int id = list.userId[i];
+        if (id == -1 || id == g_user_id || g_other_count >= OTHER_USERS)
+            continue;
+        bool known = false;
+        for (int k = 0; k < g_other_count; k++)
+            known = known || g_others[k].user == id;
+        if (known)
+            continue;
+        OtherUser &o = g_others[g_other_count];
+        o.user = id;
+        LOG("other user 0x%x logged in: opening their controllers", id);
+        move_start(g_probes[2].handle, id, o.moves);
+        pad_start(id, &o.pad);
+        g_other_count++;
+    }
+}
+
+static void update_other_users()
+{
+    for (int k = 0; k < g_other_count; k++) {
+        move_update(g_others[k].moves);
+        pad_update(&g_others[k].pad);
+    }
+}
+
+// DualShock 4 motors in the lobby, to try them: L2 drives the large motor (left grip), R2
+// the small one (right grip). Click ticks (timed pulses) are left alone; once streaming,
+// the pad stays still (nothing of it goes to SteamVR).
+static void update_pad_rumble(bool pc_connected)
+{
+    const uint8_t large = pc_connected ? 0 : (uint8_t)(g_pad.l2 * 255.0f);
+    const uint8_t small = pc_connected ? 0 : (uint8_t)(g_pad.r2 * 255.0f);
+    if (large > 8 || small > 8)
+        pad_vibrate(&g_pad, large, small, 0);
+    else if (!g_pad.vibration_end_us && (g_pad.vib_large || g_pad.vib_small))
+        pad_vibrate(&g_pad, 0, 0, 0);
+}
+
+// START on either Move, or OPTIONS on the DualShock 4, opens / closes the settings in the
+// lobby (not while the lobby is black: headset not detected). While streaming, START is
+// SteamVR's system button.
 static void handle_start_button(uint64_t now)
 {
-    static bool was_pressed[MOVE_MAX];
-    for (int i = 0; i < MOVE_MAX; i++) {
-        const bool pressed = g_moves[i].connected && (g_moves[i].buttons & MOVE_BUTTON_START);
+    static bool was_pressed[MOVE_MAX + 1];
+    for (int i = 0; i <= MOVE_MAX; i++) {
+        const bool pressed = i < MOVE_MAX ? g_moves[i].connected && (g_moves[i].buttons & MOVE_BUTTON_START)
+                                          : g_pad.connected && (g_pad.buttons & PAD_BUTTON_OPTIONS);
         if (pressed && !was_pressed[i] && g_lobby_shown && !headset_lost(now) && !settings_is_wizard()) {
             if (settings_is_open()) {
                 settings_close();
@@ -899,22 +1032,38 @@ int main()
     snprintf(vo_path, sizeof(vo_path), "/%s/common/lib/libSceVideoOut.sprx", sceKernelGetFsSandboxRandomWord());
     int videoout_module = (int)sceKernelLoadStartModule(vo_path, 0, nullptr, 0, nullptr, nullptr);
     LOG("libSceVideoOut handle=%d", videoout_module);
+    g_display_hz = g_config.refresh_rate == 90 ? 90 : 120;
     if (screen.handle > 0 && g_hmd.handle > 0 && screen_register_vr_buffers(&screen, 2) &&
-        screen_set_vr_output_mode(&screen, videoout_module) && reproj_start(g_probes[0].handle, screen.handle, 2))
-        LOG("reprojection started (2D VR mode)");
+        screen_set_vr_output_mode(&screen, videoout_module, &g_display_hz) &&
+        reproj_start(g_probes[0].handle, screen.handle, 2))
+        LOG("reprojection started (2D VR mode, %d Hz)", g_display_hz);
     else
         LOG("reprojection NOT started, falling back to direct TV output");
+    LOG("display %d Hz, stream %d fps (config %d Hz)", g_display_hz, stream_fps(), g_config.refresh_rate);
+
+    bench_start(); // Dev build: video bench server (tools/video_bench.py)
+
+    // The PC is offered the stream rate, known once the output mode is set.
+    g_wizard_pending = g_config.user_height_cm <= 0;
+    if (g_wizard_pending)
+        LOG("first launch: the PC is searched for once the height is confirmed");
+    else
+        start_alvr();
     LOG("ready");
 
     unsigned frame = 0;
     for (;;) {
         tracker_update(&g_tracker);
         move_update(g_moves);
+        pad_update(&g_pad);
         const uint64_t now = sceKernelGetProcessTime();
+        poll_other_users(now);
+        update_other_users();
         AlvrStatus alvr_st;
         alvr_get_status(&alvr_st);
         bool pc_connected = alvr_st.state == ALVR_STREAMING;
         update_tracking_state(pc_connected);
+        update_pad_rumble(pc_connected);
         for (int i = 0; i < MOVE_MAX; i++) {
             WandInput prev = g_wand_emu[i].last;
             wand_update(&g_wand_emu[i], move_index_hand(i), g_moves[i], &g_wand[i]);
@@ -942,7 +1091,8 @@ int main()
             static bool lobby_started = false;
             if (g_tracker.results_ok && g_tracker.orientation_quality != 0)
                 lobby_started = true;
-            bool stereo_video = pc_connected && render_video();
+            // A video bench clip is shown like a stream (Dev build).
+            bool stereo_video = (pc_connected || bench_active()) && render_video();
             bool stereo = stereo_video;
             g_lobby_shown = false;
             if (!stereo) {
@@ -963,7 +1113,8 @@ int main()
             // the app hangs, then ends in CE-34878-0.
             sceGnmSubmitDone();
             screen.cur ^= 1;
-            // Pace to 60 Hz from the frame start (the compositor re-displays at 120 Hz).
+            // Pace to 60 Hz (90 Hz on a 90 Hz headset) from the frame start (the compositor
+            // re-displays at 120 Hz).
             // Sleeping a fixed 16 ms after rendering made every frame render + 16 ms long.
             // While streaming, the loop follows the video instead: each frame is handed to
             // the compositor as soon as it is converted (a free-running 60 Hz timer beat
@@ -972,7 +1123,7 @@ int main()
             uint64_t now_us = sceKernelGetProcessTime();
             if (next_us == 0 || now_us > next_us + 50000)
                 next_us = now_us;
-            next_us += 16667;
+            next_us += 1000000 / (g_display_hz == 90 ? 90 : 60);
             if (stereo_video) {
                 video_wait_new(g_video_shown_seq, 25000);
                 next_us = 0;

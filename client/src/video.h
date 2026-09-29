@@ -40,9 +40,35 @@ bool video_wait_new(unsigned after_seq, uint32_t timeout_us);
 
 struct VideoStats {
     unsigned received, decoded, shown_candidates, dropped, errors;
+    unsigned lost;      // frames with missing network packets
     unsigned queue_max; // most frames waiting for the decoder since the previous call
     uint64_t decode_us_avg, convert_us_avg;
     uint64_t decode_cpu_us_avg; // CPU time the decode thread spends inside Decode
     uint64_t bytes_avg;         // average access unit size
 };
 void video_get_stats(VideoStats *out);
+
+// ---- Video bench (Dev build, tools/video_bench.py) -------------------------------------
+// Decoder pipeline depth and conversion jobs (defaults 2 and 6); the decoder is recreated
+// for another depth. null restores the defaults.
+struct VideoBenchOptions {
+    uint32_t decode_depth; // 1..8
+    int convert_jobs;      // 2, 4, 6 or 8
+};
+void video_bench_set_options(const VideoBenchOptions *o);
+struct VideoTimes {
+    unsigned n;
+    double avg, p50, p90, p99, max; // milliseconds
+};
+struct VideoBenchResult {
+    unsigned received, decoded, published, dropped, replaced, errors;
+    VideoTimes decode, convert, latency; // latency: frame pushed -> converted and published
+    uint64_t bytes;
+};
+// Between begin and end every frame is timed. While a bench runs, a frame dropped because
+// the queue is full does not make the decoder wait for an IDR (a bench clip has only one).
+void video_bench_begin();
+void video_bench_end(VideoBenchResult *out);
+// Frames waiting for the decoder; pictures published since video_bench_begin.
+int video_queued();
+unsigned video_bench_published();

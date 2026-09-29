@@ -23,6 +23,9 @@ struct ClientConfig {
     // only once at the first tracking (0: for the tracker mode, where Space Calibrator's
     // calibration must survive SteamVR restarts).
     int center_on_connect;
+    // Headset refresh rate, 90 or 60 (next launch). 90: the PSVR runs at 90 Hz and the PC
+    // streams 90 frames per second; 60: the PSVR runs at 120 Hz, each frame shown twice.
+    int refresh_rate;
 };
 
 void config_load(ClientConfig *cfg);

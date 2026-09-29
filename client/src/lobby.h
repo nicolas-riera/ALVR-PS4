@@ -34,6 +34,12 @@ struct LobbyPanel {
     LobbyPanelItem items[LOBBY_PANEL_MAX_ITEMS];
 };
 
+// Settings lasers: the two PS Moves and the DualShock 4 of the user playing.
+#define LOBBY_POINTERS 3
+// Controllers shown: two PS Moves and one DualShock 4 per logged-in user (4 at most).
+#define LOBBY_CONTROLLERS 8
+#define LOBBY_PADS 4
+
 struct LobbyPointer {
     bool visible;
     Vec3 from, to;   // laser segment, tracker space
@@ -53,19 +59,39 @@ struct LobbyView {
         Quat rot;
         uint32_t rgb;  // sphere colour
         bool tracked;  // position currently seen by the camera
-        char hand_letter; // 'L' / 'R', drawn on the handle
+        char hand_letter; // 'L' / 'R' (user playing) or the user number '2'..'4', drawn on the handle
         bool pad_touch, pad_click;
         float pad_x, pad_y;
         uint16_t buttons; // MoveButton bits: pressed buttons are drawn where they are
         float trigger;    // 0..1, drawn while pressed
         float battery;    // 0..1, < 0 unknown (drawn under the hand letter)
         bool charging;
-    } controllers[2];
+    } controllers[LOBBY_CONTROLLERS];
+    // DualShock 4, tracked by its light bar. Pad frame: x right, y up (touchpad side), -z
+    // forward (light bar side), origin at the light bar.
+    struct Pad {
+        bool visible;
+        Vec3 pos;
+        Quat rot;
+        uint32_t rgb;     // light bar colour
+        bool tracked;
+        uint32_t buttons; // PadButton bits
+        float lx, ly, rx, ry; // sticks, -1..1 (+y up)
+        float l2, r2;         // 0..1
+        bool touch[2];
+        float touch_x[2], touch_y[2]; // 0..1 from the touchpad's top left corner
+        float battery;        // 0..1, < 0 unknown
+        bool charging;
+        float rumble_large, rumble_small; // motors, 0..1
+        char label;           // 0 for the user playing, else the user number '2'..'4'
+        bool floating;        // not tracked: shown still in front of the play area
+    } pads[LOBBY_PADS];
+    float time_s;           // for animations (rumble)
     const char *info[8];    // info panel lines (nullptr-terminated)
     Vec3 info_pos;          // panel centre, tracker space
     float info_yaw;         // panel facing (radians around +Y; 0 faces +Z)
     LobbyPanel *panel;      // settings panel, or nullptr
-    LobbyPointer pointers[2];
+    LobbyPointer pointers[LOBBY_POINTERS];
     // Fade to black: 1 = scene fully visible, 0 = black.
     float brightness;
     // Text attached to the view (shown over the black), with its own brightness.

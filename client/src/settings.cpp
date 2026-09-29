@@ -7,7 +7,7 @@
 #include "log.h"
 
 // Panel layout in metres (panel coordinates: x right, y up, origin at the centre).
-static const float PANEL_W = 1.02f, PANEL_TOP = 0.31f, PANEL_BOTTOM = -0.45f;
+static const float PANEL_W = 1.02f, PANEL_TOP = 0.31f, PANEL_BOTTOM = -0.53f;
 static const float WIZARD_W = 0.90f, WIZARD_TOP = 0.19f, WIZARD_BOTTOM = -0.21f;
 static const float LABEL_H = 0.022f, TITLE_H = 0.032f, TIP_H = 0.0135f;
 static const float BTN_W = 0.07f, BTN_H = 0.05f;
@@ -18,7 +18,7 @@ static const uint64_t REPEAT_DELAY_US = 450000, REPEAT_US = 50000;
 static const uint64_t SAVE_DELAY_US = 2000000; // config written 2 s after the last change
 
 enum Button { BTN_NONE = -1, BTN_HEIGHT_MINUS, BTN_HEIGHT_PLUS, BTN_PRED_MINUS, BTN_PRED_PLUS, BTN_RES_MINUS,
-              BTN_RES_PLUS, BTN_CENTER, BTN_CLOSE, BTN_RESET, BTN_CONFIRM, BTN_COUNT };
+              BTN_RES_PLUS, BTN_RATE, BTN_CENTER, BTN_CLOSE, BTN_RESET, BTN_CONFIRM, BTN_COUNT };
 
 struct Rect {
     float x0, y0, x1, y1;
@@ -26,8 +26,8 @@ struct Rect {
 
 // Row centres of the settings panel.
 static const float ROW_TITLE = 0.255f, ROW_USER = 0.165f, ROW_CAMERA = 0.095f, ROW_TIP = 0.045f,
-                   ROW_PRED = -0.035f, ROW_RES = -0.115f, ROW_CENTER = -0.195f, ROW_ACTIONS = -0.295f,
-                   ROW_RESET = -0.390f;
+                   ROW_PRED = -0.035f, ROW_RES = -0.115f, ROW_RATE = -0.195f, ROW_CENTER = -0.275f,
+                   ROW_ACTIONS = -0.375f, ROW_RESET = -0.470f;
 // Row centres of the first launch wizard.
 static const float WROW_TITLE = 0.135f, WROW_TEXT = 0.075f, WROW_USER = 0.000f, WROW_TIP = -0.060f,
                    WROW_CONFIRM = -0.140f;
@@ -50,12 +50,12 @@ static struct {
     bool wizard;             // first launch: height and Confirm only, cannot be closed
     uint64_t no_move_since;  // wizard without any PS Move connected, since then (0: one is on)
     Vec3 origin;
-    Pointer ptr[2];
+    Pointer ptr[LOBBY_POINTERS];
     bool dirty;
     uint64_t last_change_us;
     uint64_t reset_armed_us; // first Reset click, waiting for the confirmation
     // Values shown, refreshed by settings_update.
-    char user[48], camera[48], tip[96], pred[32], res[48];
+    char user[48], camera[48], tip[96], pred[32], res[48], rate[16];
 } g;
 
 static bool button_active(int b)
@@ -85,6 +85,7 @@ static Rect button_rect(int b)
     case BTN_PRED_PLUS: return pm(PLUS_X, ROW_PRED);
     case BTN_RES_MINUS: return pm(MINUS_X, ROW_RES);
     case BTN_RES_PLUS: return pm(PLUS_X, ROW_RES);
+    case BTN_RATE: return Rect{MINUS_X, ROW_RATE - BTN_H / 2, PLUS_X + BTN_W, ROW_RATE + BTN_H / 2};
     case BTN_CENTER: return Rect{MINUS_X, ROW_CENTER - BTN_H / 2, PLUS_X + BTN_W, ROW_CENTER + BTN_H / 2};
     case BTN_CLOSE: return Rect{-0.15f, ROW_ACTIONS - 0.03f, 0.15f, ROW_ACTIONS + 0.03f};
     case BTN_RESET: return Rect{-0.19f, ROW_RESET - 0.03f, 0.19f, ROW_RESET + 0.03f};
@@ -104,10 +105,10 @@ static void save_now(const ClientConfig *cfg)
 {
     config_store(cfg);
     g.dirty = false;
-    LOG("settings: saved (user height %d cm, camera height %d cm, prediction %d ms, resolution %d%%, "
+    LOG("settings: saved (user height %d cm, camera height %d cm, prediction %d ms, resolution %d%%, %d Hz, "
         "center on SteamVR start %d)",
         cfg->user_height_cm, cfg->camera_height_cm, cfg->controller_prediction_ms, cfg->resolution_percent,
-        cfg->center_on_connect);
+        cfg->refresh_rate, cfg->center_on_connect);
 }
 
 static ClientConfig *g_cfg; // last config seen, to save on close
@@ -193,6 +194,7 @@ static unsigned apply(int b, const SettingsContext &ctx, uint64_t now)
         c->camera_height_cm = 0;
         c->user_height_cm = 0;
         c->center_on_connect = 1;
+        c->refresh_rate = 90;
         LOG("settings: reset to defaults");
         return SETTINGS_RESET;
     case BTN_HEIGHT_MINUS:
@@ -213,6 +215,9 @@ static unsigned apply(int b, const SettingsContext &ctx, uint64_t now)
         return SETTINGS_HEIGHT_CHANGED | SETTINGS_CONFIRMED;
     case BTN_CENTER:
         c->center_on_connect = !c->center_on_connect;
+        return 0;
+    case BTN_RATE:
+        c->refresh_rate = c->refresh_rate == 90 ? 60 : 90;
         return 0;
     case BTN_PRED_MINUS:
     case BTN_PRED_PLUS: {
@@ -235,7 +240,8 @@ static bool is_repeatable(int b)
     return b >= BTN_HEIGHT_MINUS && b <= BTN_RES_PLUS;
 }
 
-unsigned settings_update(const SettingsContext &ctx, const SettingsRay rays[2], uint64_t now, int *clicked_hand)
+unsigned settings_update(const SettingsContext &ctx, const SettingsRay rays[LOBBY_POINTERS], uint64_t now,
+                         int *clicked_hand)
 {
     *clicked_hand = -1;
     g_cfg = ctx.config;
@@ -246,7 +252,7 @@ unsigned settings_update(const SettingsContext &ctx, const SettingsRay rays[2], 
     bool close = false;
     const float half_w = (g.wizard ? WIZARD_W : PANEL_W) / 2, top = g.wizard ? WIZARD_TOP : PANEL_TOP,
                 bottom = g.wizard ? WIZARD_BOTTOM : PANEL_BOTTOM;
-    for (int i = 0; i < 2; i++) {
+    for (int i = 0; i < LOBBY_POINTERS; i++) {
         Pointer &p = g.ptr[i];
         const SettingsRay &r = rays[i];
         p.valid = r.valid;
@@ -296,17 +302,17 @@ unsigned settings_update(const SettingsContext &ctx, const SettingsRay rays[2], 
             p.next_repeat_us = now + REPEAT_US;
         }
     }
-    // Wizard without any PS Move to click with (they are optional): it goes on by itself
-    // after 20 s with the default height.
+    // Wizard without any controller to click with (PS Moves and the DualShock 4 are
+    // optional): it goes on by itself after 20 s with the default height.
     int no_move_left_s = -1;
     if (g.wizard && !(actions & SETTINGS_CONFIRMED)) {
-        if (ctx.moves_connected > 0) {
+        if (ctx.pointers_connected > 0) {
             g.no_move_since = 0;
         } else {
             if (!g.no_move_since)
                 g.no_move_since = now;
             if (now - g.no_move_since >= WIZARD_NO_MOVE_US) {
-                LOG("settings: no PS Move connected, the first launch wizard goes on by itself");
+                LOG("settings: no controller connected, the first launch wizard goes on by itself");
                 actions |= apply(BTN_CONFIRM, ctx, now);
             } else {
                 no_move_left_s = (int)((WIZARD_NO_MOVE_US - (now - g.no_move_since)) / 1000000) + 1;
@@ -316,7 +322,8 @@ unsigned settings_update(const SettingsContext &ctx, const SettingsRay rays[2], 
     const ClientConfig *c = ctx.config;
     if (c->camera_height_cm != before.camera_height_cm || c->user_height_cm != before.user_height_cm ||
         c->controller_prediction_ms != before.controller_prediction_ms ||
-        c->resolution_percent != before.resolution_percent || c->center_on_connect != before.center_on_connect) {
+        c->resolution_percent != before.resolution_percent || c->center_on_connect != before.center_on_connect ||
+        c->refresh_rate != before.refresh_rate) {
         g.dirty = true;
         g.last_change_us = now;
     }
@@ -330,15 +337,17 @@ unsigned settings_update(const SettingsContext &ctx, const SettingsRay rays[2], 
     format_height(g.user, sizeof(g.user), (c->user_height_cm > 0 ? c->user_height_cm : DEFAULT_USER_HEIGHT_CM) / 100.0f);
     format_height(g.camera, sizeof(g.camera), -floor_y);
     if (g.wizard && no_move_left_s > 0)
-        snprintf(g.tip, sizeof(g.tip), "No PS Move connected: going on with this height in %d s", no_move_left_s);
+        snprintf(g.tip, sizeof(g.tip), "No controller connected: going on with this height in %d s", no_move_left_s);
     else if (g.wizard)
-        snprintf(g.tip, sizeof(g.tip), "%s", "Point with a PS Move and pull the trigger. You can change it later.");
+        snprintf(g.tip, sizeof(g.tip), "%s",
+                 "Point with a PS Move (trigger) or the DualShock 4 (Cross). You can change it later.");
     else
         snprintf(g.tip, sizeof(g.tip), "%s",
                  c->user_height_cm > 0 ? "Stand straight when you change it: the floor is placed from your headset"
                                        : "Floor estimated: stand straight and set your height with - / +");
     snprintf(g.pred, sizeof(g.pred), "%d ms", c->controller_prediction_ms);
     snprintf(g.res, sizeof(g.res), "%d %%  (next launch)", c->resolution_percent);
+    snprintf(g.rate, sizeof(g.rate), "%d Hz", c->refresh_rate);
     if (close || (actions & (SETTINGS_CONFIRMED | SETTINGS_RESET)))
         close_panel();
     return actions;
@@ -368,9 +377,9 @@ static void text(LobbyPanel *p, float x0, float x1, float row, const char *s, fl
     it->text_rgb = rgb;
 }
 
-void settings_build(LobbyPanel *panel, LobbyPointer pointers[2])
+void settings_build(LobbyPanel *panel, LobbyPointer pointers[LOBBY_POINTERS])
 {
-    memset(pointers, 0, sizeof(LobbyPointer) * 2);
+    memset(pointers, 0, sizeof(LobbyPointer) * LOBBY_POINTERS);
     panel->visible = g.open;
     panel->count = 0;
     if (!g.open)
@@ -405,18 +414,24 @@ void settings_build(LobbyPanel *panel, LobbyPointer pointers[2])
         text(panel, vx0, vx1, ROW_PRED, g.pred, LABEL_H, -1, 0xffffff);
         text(panel, lx0, vx0, ROW_RES, "Stream resolution", LABEL_H, -1, 0xc0c8d0);
         text(panel, vx0, vx1, ROW_RES, g.res, LABEL_H, -1, 0xffffff);
+        text(panel, lx0, vx0, ROW_RATE, "Refresh rate", LABEL_H, -1, 0xc0c8d0);
+        text(panel, vx0, vx1, ROW_RATE, "(next launch)", LABEL_H, -1, 0xffffff);
         text(panel, lx0, MINUS_X - 0.01f, ROW_CENTER, "Center on the headset at SteamVR start", LABEL_H, -1,
              0xc0c8d0);
     }
 
-    static const char *labels[BTN_COUNT] = {"-", "+", "-", "+", "-", "+", "On", "Close", "Reset settings", "Confirm"};
+    static const char *labels[BTN_COUNT] = {"-", "+", "-", "+", "-", "+", "", "On", "Close", "Reset settings", "Confirm"};
+    labels[BTN_RATE] = g.rate;
     labels[BTN_RESET] = g.reset_armed_us ? "Click again to reset" : "Reset settings";
     labels[BTN_CENTER] = g_cfg && !g_cfg->center_on_connect ? "Off" : "On";
     for (int b = 0; b < BTN_COUNT; b++) {
         if (!button_active(b))
             continue;
-        bool hover = g.ptr[0].hover == b || g.ptr[1].hover == b;
-        bool down = (g.ptr[0].held == b && g.ptr[0].hover == b) || (g.ptr[1].held == b && g.ptr[1].hover == b);
+        bool hover = false, down = false;
+        for (const Pointer &p : g.ptr) {
+            hover = hover || p.hover == b;
+            down = down || (p.held == b && p.hover == b);
+        }
         Rect r = button_rect(b);
         LobbyPanelItem *it = add(panel, r.x0, r.y0, r.x1, r.y1);
         if (!it)
@@ -426,12 +441,12 @@ void settings_build(LobbyPanel *panel, LobbyPointer pointers[2])
         it->fill = down ? 0x4a5670 : armed ? 0x5a1c1c : on ? 0x1c4a30 : hover ? 0x263044 : 0x161c28;
         it->outline = hover ? 0xffd040 : b == BTN_RESET ? 0xc05050 : b == BTN_CONFIRM ? 0x60c080 : 0x7088a0;
         it->text = labels[b];
-        it->text_h = b >= BTN_CENTER ? LABEL_H : LABEL_H * 1.3f;
+        it->text_h = b >= BTN_RATE ? LABEL_H : LABEL_H * 1.3f;
         it->align = 0;
         it->text_rgb = 0xffffff;
     }
 
-    for (int i = 0; i < 2; i++) {
+    for (int i = 0; i < LOBBY_POINTERS; i++) {
         const Pointer &p = g.ptr[i];
         pointers[i].visible = p.valid;
         pointers[i].from = p.from;

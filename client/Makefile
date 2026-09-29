@@ -46,7 +46,8 @@ CC          := clang
 CXX         := clang++
 LD          := ld.lld
 
-CXXFLAGS    := --target=x86_64-pc-freebsd12-elf -fPIC -funwind-tables -O2 -Wall -DALVR_PS4_DEV=$(VARIANT_DEF) \
+# The PS4 CPU is an AMD Jaguar (btver2): SSSE3, SSE4.1/4.2, AVX, F16C.
+CXXFLAGS    := --target=x86_64-pc-freebsd12-elf -march=btver2 -fPIC -funwind-tables -O2 -Wall -DALVR_PS4_DEV=$(VARIANT_DEF) \
                -isysroot $(TOOLCHAIN) -isystem $(TOOLCHAIN)/include -isystem $(TOOLCHAIN)/include/c++/v1
 LDFLAGS     := -m elf_x86_64 -pie --script $(TOOLCHAIN)/link.x --eh-frame-hdr -L$(TOOLCHAIN)/lib $(LIBS) $(TOOLCHAIN)/lib/crt1.o
 
@@ -86,7 +87,7 @@ eboot.bin: $(OBJS)
 	$(LD) $(OBJS) -o $(BUILD)/alvr_ps4.elf $(LDFLAGS)
 	$(BIN)/create-fself -in=$(BUILD)/alvr_ps4.elf -out=$(BUILD)/alvr_ps4.oelf --eboot "eboot.bin" --paid 0x3800000000000011 --sdkver $(SDK_VERSION)
 
-$(BUILD)/%.o: src/%.cpp $(wildcard src/*.h) $(VARIANT_STAMP)
+$(BUILD)/%.o: src/%.cpp $(wildcard src/*.h) $(VARIANT_STAMP) Makefile
 	@mkdir -p $(BUILD)
 	$(CXX) $(CXXFLAGS) -c -o $@ $<
 

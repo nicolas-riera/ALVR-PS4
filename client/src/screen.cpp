@@ -187,27 +187,57 @@ static_assert(sizeof(VideoOutMode) == 0x20, "VideoOutMode size");
 typedef int (*PFN_ConfigureOutputMode)(int32_t handle, uint32_t reserved, const VideoOutMode *mode,
                                        const void *options, uint32_t mode_size, uint32_t options_size);
 
-bool screen_set_vr_output_mode(Screen *s, int videoout_module)
+static const uint64_t REFRESH_119_88HZ = 13, REFRESH_89_91HZ = 35; // SceVideoOutRefreshRate
+
+// Returns the configure result; *confirmed tells whether the output reports the new rate.
+static int configure_vr_mode(Screen *s, PFN_ConfigureOutputMode configure, uint64_t rate, const char *name,
+                             bool *confirmed)
 {
-    // What Unity does for PSVR: "any" mode (all 0xff), 119.88 Hz, and this resolution mask.
-    // This is the output mode switch that makes capture cards drop and re-sync.
+    // What Unity does for PSVR: "any" mode (all 0xff), the refresh rate, and this
+    // resolution mask. This is the output mode switch that makes capture cards re-sync.
+    VideoOutMode mode;
+    memset(&mode, 0xff, sizeof(mode));
+    mode.size = sizeof(mode);
+    mode.refresh_rate = rate;
+    mode.resolution = 0xFFFFFFFFC1FFFFFFull;
+    int rc = configure(s->handle, 0, &mode, nullptr, sizeof(mode), 0x10);
+    LOG("sceVideoOutConfigureOutputMode_(%s) -> 0x%08x", name, (unsigned)rc);
+    if (rc < 0) {
+        uint8_t options[0x10];
+        memset(options, 0, sizeof(options));
+        rc = configure(s->handle, 0, &mode, options, sizeof(mode), sizeof(options));
+        LOG("sceVideoOutConfigureOutputMode_(%s, zeroed options) -> 0x%08x", name, (unsigned)rc);
+    }
+    *confirmed = false;
+    if (rc < 0)
+        return rc;
+    // The reprojection reads the refresh rate once, when it starts (89.91 Hz makes it run
+    // at 90 Hz, 119.88 Hz at 120 Hz): wait until the new mode is in place.
+    OrbisVideoOutResolutionStatus st;
+    for (int i = 0; i < 100; i++) {
+        memset(&st, 0, sizeof(st));
+        if (sceVideoOutGetResolutionStatus(s->handle, &st) == 0 && st.refreshRate == rate) {
+            LOG("video output: %ux%u at %s after %d ms", st.width, st.height, name, i * 20);
+            *confirmed = true;
+            return rc;
+        }
+        sceKernelUsleep(20000);
+    }
+    LOG("video output: refresh rate %llu after 2 s (%s requested)", (unsigned long long)st.refreshRate, name);
+    return rc;
+}
+
+bool screen_set_vr_output_mode(Screen *s, int videoout_module, int *hz)
+{
     PFN_ConfigureOutputMode configure = nullptr;
     if (sceKernelDlsym(videoout_module, "sceVideoOutConfigureOutputMode_", (void **)&configure) != 0 || !configure) {
         LOG("sceVideoOutConfigureOutputMode_ not found");
         return false;
     }
-    VideoOutMode mode;
-    memset(&mode, 0xff, sizeof(mode));
-    mode.size = sizeof(mode);
-    mode.refresh_rate = 13; // SCE_VIDEO_OUT_REFRESH_RATE_119_88HZ
-    mode.resolution = 0xFFFFFFFFC1FFFFFFull;
-    int rc = configure(s->handle, 0, &mode, nullptr, sizeof(mode), 0x10);
-    LOG("sceVideoOutConfigureOutputMode_(119.88 Hz) -> 0x%08x", (unsigned)rc);
-    if (rc < 0) {
-        uint8_t options[0x10];
-        memset(options, 0, sizeof(options));
-        rc = configure(s->handle, 0, &mode, options, sizeof(mode), sizeof(options));
-        LOG("sceVideoOutConfigureOutputMode_(119.88 Hz, zeroed options) -> 0x%08x", (unsigned)rc);
-    }
-    return rc >= 0;
+    bool confirmed;
+    // 90 Hz only once the output really runs at 89.91 Hz, otherwise the usual 120 Hz.
+    if (*hz == 90 && configure_vr_mode(s, configure, REFRESH_89_91HZ, "89.91 Hz", &confirmed) >= 0 && confirmed)
+        return true;
+    *hz = 120;
+    return configure_vr_mode(s, configure, REFRESH_119_88HZ, "119.88 Hz", &confirmed) >= 0;
 }

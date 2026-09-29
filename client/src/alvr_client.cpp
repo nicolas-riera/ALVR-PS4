@@ -356,18 +356,19 @@ static void write_capabilities(BinWriter &w)
 {
     static char caps[640];
     snprintf(caps, sizeof(caps),
-             "{\"default_view_resolution\":[%u,%u],\"supported_refresh_rates\":[60.0],"
+             "{\"default_view_resolution\":[%u,%u],\"supported_refresh_rates\":[%.1f],"
              "\"microphone_sample_rate\":48000,\"supports_foveated_encoding\":true,\"encoder_high_profile\":true,"
              "\"encoder_10_bits\":false,\"encoder_av1\":false,\"multimodal_protocol\":false,\"prefer_10bit\":false,"
              "\"prefer_full_range\":true,\"preferred_encoding_gamma\":1.0,\"prefer_hdr\":false}",
-             g_views.view_width, g_views.view_height);
+             g_views.view_width, g_views.view_height, (double)g_views.fps);
     w.u8(1); // Some(VideoStreamingCapabilitiesLegacy)
     w.u32(g_views.view_width);
     w.u32(g_views.view_height);
     size_t n = strlen(caps);
-    // 60 Hz only: the system compositor reprojects 60 Hz to the PSVR's 120 Hz, as games do.
+    // One rate only, so the streamer uses it whatever its preferred_fps: 90 with the PSVR
+    // at 90 Hz, or 60 reprojected by the system compositor to the PSVR's 120 Hz.
     w.u64(1 + n);
-    w.f32(60.0f);
+    w.f32(g_views.fps);
     for (size_t i = 0; i < n; i++)
         w.f32(-(float)(uint8_t)caps[i]); // JSON smuggled as negative "refresh rates"
     w.u32(48000);

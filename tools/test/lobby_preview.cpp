@@ -2,7 +2,8 @@
 // Build (WSL):
 //   g++ -O2 -I client/src tools/test/lobby_preview.cpp client/src/lobby.cpp client/src/settings.cpp -o /tmp/lobby_preview
 // Usage: lobby_preview out.ppm [yaw] [mode]   mode: 0 lobby, 1 settings open, 2 headset lost (black + text),
-//                                             3 close-up of the controllers (buttons, battery)
+//                                             3 close-up of the controllers (buttons, battery),
+//                                             4 first launch wizard, 5 close-up of the DualShock 4
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -10,6 +11,7 @@
 
 #include "lobby.h"
 #include "move.h"
+#include "pad.h"
 #include "settings.h"
 
 // Stubs for what settings.cpp uses on the console.
@@ -44,7 +46,8 @@ int main(int argc, char **argv)
     v.floor_y = -1.47f;
     v.center_x = 0.3f;
     v.center_z = 0.9f;
-    SettingsRay rays[2];
+    SettingsRay rays[LOBBY_POINTERS];
+    memset(rays, 0, sizeof(rays));
     for (int i = 0; i < 2; i++) {
         LobbyView::Controller &c = v.controllers[i];
         c.visible = true;
@@ -70,12 +73,55 @@ int main(int argc, char **argv)
         rays[i].dir = rays[i].dir * (1.0f / n);
         rays[i].trigger = 0.0f;
     }
+    // DualShock 4 held in front, top face tilted towards the viewer.
+    {
+        LobbyView::Pad &d = v.pads[0];
+        const float a = (mode == 5 ? 55.0f : 30.0f) * 0.0174533f;
+        d.visible = true;
+        d.pos = mode == 5 ? head + v3(0.0f, -0.10f, -0.26f) : v3(0.0f, -0.55f, 0.45f);
+        d.rot = Quat{sinf(a / 2), 0, 0, cosf(a / 2)};
+        d.rgb = 0x0000ff;
+        d.tracked = true;
+        d.buttons = PAD_BUTTON_CROSS | PAD_BUTTON_TRIANGLE | PAD_BUTTON_LEFT | PAD_BUTTON_R1 | PAD_BUTTON_R3 |
+                    PAD_BUTTON_OPTIONS | PAD_BUTTON_TOUCH_PAD;
+        d.lx = -0.7f;
+        d.ly = 0.7f;
+        d.rx = 0.2f;
+        d.l2 = 0.4f;
+        d.r2 = 1.0f;
+        d.touch[0] = true;
+        d.touch_x[0] = 0.25f;
+        d.touch_y[0] = 0.4f;
+        d.touch[1] = true;
+        d.touch_x[1] = 0.8f;
+        d.touch_y[1] = 0.7f;
+        d.battery = 0.6f;
+        d.charging = true;
+        d.rumble_large = 0.4f;
+        d.rumble_small = 1.0f;
+        v.time_s = 0.3f;
+        // A second user's pad, labelled "2", further away (lobby view only).
+        if (mode == 0) {
+            v.pads[1] = d;
+            v.pads[1].pos = v3(0.35f, -0.62f, 0.45f);
+            v.pads[1].rot = Quat{sinf(0.35f), 0, 0, cosf(0.35f)};
+            v.pads[1].floating = true;
+            v.pads[1].tracked = false;
+            v.pads[1].rgb = 0xffff00;
+            v.pads[1].label = '2';
+            v.pads[1].buttons = 0;
+            v.pads[1].rumble_large = v.pads[1].rumble_small = 0.0f;
+        }
+        rays[2].valid = mode != 5;
+        rays[2].origin = d.pos;
+        rays[2].dir = rotate(d.rot, v3(0, 0, -1));
+    }
     v.info[0] = "ALVR PS4 (Dev)";
     v.info[1] = "Waiting for the PC (ALVR streamer 20.14.1)";
     v.info[2] = "Hostname: 1234.client";
     v.info[3] = "IP: 192.168.0.124";
     v.info[4] = "Client v0.9.3";
-    v.info[5] = "Press Start to open settings";
+    v.info[5] = "Press Start (PS Move) or Options (DualShock 4) to open settings";
     v.info[6] = nullptr;
     v.info_pos = v3(0.0f, v.floor_y + 1.6f, -3.0f);
     v.info_yaw = 0.0f;
@@ -86,6 +132,7 @@ int main(int argc, char **argv)
         memset(&cfg, 0, sizeof(cfg));
         cfg.resolution_percent = 130;
         cfg.center_on_connect = 1;
+        cfg.refresh_rate = 90;
         if (mode == 4)
             settings_open_wizard(head);
         else
