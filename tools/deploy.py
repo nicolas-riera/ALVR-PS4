@@ -19,18 +19,23 @@ if not os.path.exists(pkg):
     sys.exit(f"{os.path.basename(pkg)} not found: build first (wsl -d Debian -- bash tools/build.sh"
              + (" VARIANT=stable)" if stable else ")"))
 
-ftp = ftplib.FTP()
-ftp.connect(ip, port, timeout=30)
-ftp.login()
-try:
-    ftp.mkd("/data/pkg")
-except ftplib.error_perm:
-    pass
-ftp.cwd("/data/pkg")
 name = os.path.basename(pkg)
 size = os.path.getsize(pkg)
-with open(pkg, "rb") as f:
-    ftp.storbinary(f"STOR {name}", f)
-remote = ftp.size(name)
-ftp.quit()
-print(f"Uploaded {name} ({size} bytes) -> /data/pkg/{name}" + ("" if remote == size else f" SIZE MISMATCH remote={remote}"))
+try:
+    ftp = ftplib.FTP()
+    ftp.connect(ip, port, timeout=30)
+    ftp.login()
+    try:
+        ftp.mkd("/data/pkg")
+    except ftplib.error_perm:
+        pass
+    ftp.cwd("/data/pkg")
+    with open(pkg, "rb") as f:
+        ftp.storbinary(f"STOR {name}", f)
+    remote = ftp.size(name)
+    ftp.quit()
+except (OSError, ftplib.Error) as e:
+    sys.exit(f"Upload to {ip}:{port} failed: {e} (is the PS4 on, with GoldHEN's FTP server enabled?)")
+if remote != size:
+    sys.exit(f"Uploaded {name}, but SIZE MISMATCH: local {size}, remote {remote}; upload again")
+print(f"Uploaded {name} ({size} bytes) -> /data/pkg/{name}")

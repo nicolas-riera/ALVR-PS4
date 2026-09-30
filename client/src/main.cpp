@@ -4,6 +4,7 @@
 // probes the system modules the later stages depend on (Hmd, VrTracker, Move,
 // Camera, video decoder, audio) so we know what loads from a homebrew process.
 
+#include <atomic>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -36,7 +37,7 @@
 #include "video.h"
 #include "bench.h"
 
-#define ALVR_PS4_VERSION "0.10.0"
+#define ALVR_PS4_VERSION "0.11.0"
 #if ALVR_PS4_DEV
 #define ALVR_PS4_TITLE "ALVR PS4 (Dev)"
 #else
@@ -84,6 +85,7 @@ static ModuleProbe g_probes[] = {
     {"libSceHmdReprojectionMultilayer", 0, {nullptr}},
     {"libSceCommonDialog", 0x80000018, {"sceCommonDialogInitialize", nullptr}},
     {"libSceHmdSetupDialog", 0x00EB, {"sceHmdSetupDialogInitialize", "sceHmdSetupDialogOpen", nullptr}},
+    {"libSceVrServiceDialog", 0x00FD, {"sceVrServiceDialogInitialize", "sceVrServiceDialogOpen", nullptr}},
 };
 static const int NUM_PROBES = sizeof(g_probes) / sizeof(g_probes[0]);
 
@@ -153,6 +155,10 @@ static uint64_t g_hmd_init_after_us = 0; // sightings before this time do not co
 static bool g_center_set = false;
 static float g_center_x = 0.0f, g_center_z = 0.0f;
 static bool g_lobby_shown = false;             // the last frame was the lobby
+// Lobby while streaming (hold Cross on the left PS Move or Circle on the right one): the
+// ALVR session stays open with tracking, audio and microphone, but the video is not
+// decoded, the buttons are not sent to SteamVR and the game's vibrations are ignored.
+static std::atomic<bool> g_stream_paused{false}; // also read by the network thread (haptics)
 // First launch (no height saved yet): the height wizard shows in the lobby and the PC is
 // not searched for until it is confirmed.
 static bool g_wizard_pending = false; // also after a settings Reset
@@ -367,7 +373,7 @@ static bool lobby_haptics_allowed()
 {
     AlvrStatus st;
     alvr_get_status(&st);
-    return st.state != ALVR_STREAMING;
+    return st.state != ALVR_STREAMING || g_stream_paused;
 }
 
 // Once per frame, before the uplink: tracking initialization, floor, play space centre.
@@ -412,28 +418,177 @@ static uint64_t g_m2p_avg_us;      // motion-to-photon of the stream, averaged
 // but climbs to 300 ms while SteamVR resends old frames (loading, paused).
 static const uint64_t HEAD_PREDICTION_LATENCY_MAX_US = 70000;
 
+// Console model for the performance overlay: the PS4 Pro has the "Neo" hardware mode
+// (libkernel says so whether this app runs in it or not); the Fat and Slim models are
+// not told apart.
+extern "C" int sceKernelHasNeoMode(void);
+extern "C" int sceKernelIsAuthenticNeo(void);
+static const char *g_ps4_model = "PS4";
+
+static void detect_ps4_model()
+{
+    const int has_neo = sceKernelHasNeoMode(), authentic = sceKernelIsAuthenticNeo(), neo_mode = sceKernelIsNeoMode();
+    g_ps4_model = has_neo == 1 || authentic == 1 ? "PS4 Pro" : "PS4";
+    LOG("console: %s (HasNeoMode %d, IsAuthenticNeo %d, IsNeoMode %d, CPU %d MHz)", g_ps4_model, has_neo, authentic,
+        neo_mode, sceKernelGetCpuFrequency() / 1000000);
+}
+
+// Performance overlay (settings: "Performance overlay"), drawn by the video conversion
+// into each frame, refreshed every second: console, refresh rate and bitrate;
+// frame rate, latency (tracking sample to display), decoding time; frames lost for the
+// display in the last second (never shown, repeated, late).
+static uint64_t g_hud_start;   // start of the second being counted (0: none)
+// Per shown frame, averaged: decoding (received -> decoder picture) and wait (picture ->
+// submitted: conversion, then the frame waits for its decision point).
+static uint64_t g_decode_lat_us, g_wait_lat_us;
+static bool g_hud_shown;       // the overlay holds text
+
+static void hud_clear()
+{
+    if (g_hud_shown)
+        video_set_overlay(nullptr, nullptr, 0, nullptr);
+    g_hud_shown = false;
+    g_hud_start = 0;
+}
+
+static void update_hud(uint64_t now, bool fresh, bool repeat)
+{
+    if (!g_config.hud) {
+        hud_clear();
+        return;
+    }
+    uint64_t &start = g_hud_start;
+    static uint64_t last_bytes;
+    static unsigned frames, repeats, last_dropped, last_lost;
+    static VideoPacingStats last;
+    frames += fresh;
+    repeats += repeat;
+    if (start && now - start < 1000000)
+        return;
+    VideoStats vs;
+    video_peek_stats(&vs);
+    VideoPacingStats ps;
+    video_pacing_stats(&ps);
+    if (start) {
+        const double secs = (now - start) / 1e6;
+        // Counters can restart from 0 (a Dev video bench clears the video statistics).
+        auto diff = [](unsigned cur, unsigned before) { return cur >= before ? cur - before : cur; };
+        const unsigned drops = diff(ps.overflow, last.overflow) + diff(ps.trimmed, last.trimmed) +
+                               diff(ps.replaced, last.replaced) + diff(vs.dropped, last_dropped);
+        const unsigned late = diff(ps.late, last.late), lost = diff(vs.lost, last_lost);
+        const uint64_t bytes = vs.bytes_total >= last_bytes ? vs.bytes_total - last_bytes : vs.bytes_total;
+        // Short lines: at a legible size each character spans ~1.3 degrees of the view.
+        static char lines[4][48];
+        snprintf(lines[0], sizeof(lines[0]), "%s | %d Hz | %.0f Mbps", g_ps4_model, g_display_hz,
+                 bytes * 8.0 / 1e6 / secs);
+        snprintf(lines[1], sizeof(lines[1]), "FPS %.1f | Latency %.0f ms", frames / secs, g_m2p_avg_us / 1000.0);
+        snprintf(lines[2], sizeof(lines[2]), "Decode %.0f ms | Wait %.1f ms", g_decode_lat_us / 1000.0,
+                 g_wait_lat_us / 1000.0);
+        snprintf(lines[3], sizeof(lines[3]), "Drops %u | Repeats %u | Late %u | Lost %u", drops, repeats, late, lost);
+        const char *text[4] = {lines[0], lines[1], lines[2], lines[3]};
+        const uint32_t warn = 0xffa030;
+        const uint32_t rgb[4] = {0xffffff, 0xffffff, 0xffffff, drops || late || lost ? warn : 0xffffff};
+        EyeFov fov[2];
+        headset_fov(fov);
+        const float tangents[2][4] = {{fov[0].tan_left, fov[0].tan_right, fov[0].tan_up, fov[0].tan_down},
+                                      {fov[1].tan_left, fov[1].tan_right, fov[1].tan_up, fov[1].tan_down}};
+        video_set_overlay(text, rgb, 4, tangents);
+        g_hud_shown = true;
+    }
+    start = now;
+    frames = repeats = 0;
+    last = ps;
+    last_bytes = vs.bytes_total;
+    last_dropped = vs.dropped;
+    last_lost = vs.lost;
+}
+
+static uint64_t g_prev_display_us; // display time of the last new frame (ALVR frame interval)
+
+// Compositor pass timing (paced stream). The compositor reads the last submitted frame right
+// after it triggers its pass event (reference/decomp/hmd_thread.c: the trigger, then the
+// submitted frame index is read), so a frame submitted when the loop was woken by the event
+// only made the next pass, 11 ms later. The loop now sleeps after the event and submits
+// shortly before the next pass (pass_wait_and_lead).
+static uint64_t g_pass_period_us = 11111; // measured between pass events
+static uint64_t g_next_pass_us;           // expected next pass event (0: unknown)
+static uint64_t g_submit_lead_us = 2500;  // wake-up this long before it (grows after a miss)
+static uint64_t g_loop_work_us;           // loop work from the wake-up to the submission (decaying peak)
+static uint64_t g_loop_resume_us;         // wake-up time of this loop iteration
+static unsigned g_pass_misses;            // submissions that came after the pass event
+static const uint64_t LEAD_MAX_US = 6000;
+// From the pass event to the photons (reprojection render, flip at vblank, panel): an
+// estimate, for the latency reported.
+static const uint64_t LATCH_TO_PHOTON_US = 4000;
+
+// No stream frame shown (lobby, paused, disconnected): no prediction, and the latency, the
+// frame interval and the overlay start again from the next frame shown.
+static void video_not_shown()
+{
+    g_tracker_controller_prediction_us = 0; // lobby: show the Moves where they are
+    g_tracker_head_prediction_us = 0;
+    g_m2p_avg_us = 0;
+    g_prev_display_us = 0;
+    g_next_pass_us = 0; // the lobby does not follow the passes: the first wait is not a miss
+    hud_clear();
+}
+
+// Waits for the compositor's pass event, then sleeps until shortly before the next one, so
+// that the loop's work and the submission end just before that pass reads the frame. A
+// submission that comes after the pass (the event was already there when waited for) is a
+// miss: the lead grows by 0.5 ms; it shrinks back slowly towards the work time + 1 ms.
+static bool pass_wait_and_lead()
+{
+    const uint64_t t0 = sceKernelGetProcessTime();
+    if (!reproj_wait_frame(25000)) {
+        g_next_pass_us = 0;
+        return false;
+    }
+    const uint64_t e = sceKernelGetProcessTime();
+    static uint64_t last_e;
+    const uint64_t floor_us = g_loop_work_us + 1000 < LEAD_MAX_US ? g_loop_work_us + 1000 : LEAD_MAX_US;
+    if (e - t0 < 200 && g_next_pass_us) {
+        g_pass_misses++;
+        g_submit_lead_us = g_submit_lead_us + 500 > LEAD_MAX_US ? LEAD_MAX_US : g_submit_lead_us + 500;
+    } else if (g_submit_lead_us > floor_us + 10) {
+        g_submit_lead_us -= 10;
+    }
+    if (g_submit_lead_us < floor_us)
+        g_submit_lead_us = floor_us;
+    if (last_e && e > last_e && e - last_e < 2 * g_pass_period_us)
+        g_pass_period_us = (g_pass_period_us * 63 + (e - last_e)) / 64;
+    last_e = e;
+    g_next_pass_us = e + g_pass_period_us;
+    const uint64_t target = g_next_pass_us > g_submit_lead_us ? g_next_pass_us - g_submit_lead_us : e;
+    uint64_t now = sceKernelGetProcessTime();
+    if (target > now + 400)
+        sceKernelUsleep((uint32_t)(target - now - 300));
+    while ((now = sceKernelGetProcessTime()) < target) {
+    }
+    g_loop_resume_us = now;
+    return true;
+}
+
 // Streamed frame: shown through the compositor with the pose it was rendered for.
 // Returns false (lobby shown instead) until frames arrive, or after 1.5 s without one.
 static bool render_video()
 {
-    // Paced: one frame per stream frame period of the display (every refresh at 90 Hz, every
-    // other at 120 Hz), taken in order from the frames waiting, with one kept in reserve.
+    // Paced: one decision per stream frame period (every refresh at 90 Hz, every other at
+    // 120 Hz), just before a compositor pass: the newest frame due is shown (video.cpp).
     // Shown as soon as converted instead, frames reached the compositor at irregular points
     // of its cycle (network, decoding and conversion times vary by a few ms, and the PC
     // runs at 90.00 fps against the headset's 89.91 Hz): at 90 Hz one frame in the 11.1 ms
     // window often came a pass late and the next one replaced it, a constant judder in the
-    // headset (worse on a base PS4). The reserve absorbs that variation, at the cost of up
-    // to one frame of latency; one frame is skipped every ~11 s for the rate difference.
+    // headset (worse on a base PS4); one frame is skipped every ~11 s for the rate difference.
     static unsigned tick;
     const unsigned per_frame = g_display_hz == 90 ? 1 : 2;
     const bool take = !g_paced || ++tick % per_frame == 0;
     VideoFrame vf;
-    if (!video_next(&vf, take, g_paced ? 1 : 0) || sceKernelGetProcessTime() - vf.decoded_us > 1500000) {
-        g_tracker_controller_prediction_us = 0; // lobby: show the Moves where they are
-        g_tracker_head_prediction_us = 0;
-        g_m2p_avg_us = 0;
+    if (!video_next(&vf, take, g_paced) || sceKernelGetProcessTime() - vf.decoded_us > 1500000) {
+        video_not_shown();
         return false;
     }
+    const uint64_t taken_us = sceKernelGetProcessTime();
     // Frames out of line (hardware report: now and then, mostly while turning, the headset
     // shows for one frame what looks like the picture of 3-4 frames before): a pose not
     // found, a tracking timestamp older than the previous frame's, or much older than usual.
@@ -502,11 +657,37 @@ static bool render_video()
         last_seq = vf.seq;
         uint64_t sample_us = vf.timestamp_ns / 1000;
         const uint64_t vsync = 1000000 / g_display_hz;
-        if (sample_us && now + vsync > sample_us && now + vsync - sample_us < 500000) {
-            uint64_t m2p = now + vsync - sample_us;
+        // Shown by the next pass (paced: submitted just before it), else by the one after.
+        const uint64_t display_us = g_paced && g_next_pass_us > now && g_next_pass_us - now < 2 * vsync
+                                        ? g_next_pass_us + LATCH_TO_PHOTON_US
+                                        : now + vsync + LATCH_TO_PHOTON_US;
+        if (sample_us && display_us > sample_us && display_us - sample_us < 500000) {
+            uint64_t m2p = display_us - sample_us;
             m2p_avg_us = m2p_avg_us ? (m2p_avg_us * 31 + m2p) / 32 : m2p;
         }
+        if (vf.received_us && vf.picture_us >= vf.received_us && now >= vf.picture_us) {
+            const uint64_t dec = vf.picture_us - vf.received_us, wait = now - vf.picture_us;
+            g_decode_lat_us = g_decode_lat_us ? (g_decode_lat_us * 15 + dec) / 16 : dec;
+            g_wait_lat_us = g_wait_lat_us ? (g_wait_lat_us * 15 + wait) / 16 : wait;
+        }
+        // ALVR dashboard statistics for this frame (its stages in process time, each one
+        // starting where the previous ended).
+        uint64_t &prev_display_us = g_prev_display_us;
+        if (vf.timestamp_ns && sample_us < display_us && vf.received_us && vf.picture_us >= vf.received_us &&
+            taken_us >= vf.picture_us) {
+            AlvrFrameStatistics fs;
+            fs.target_timestamp_ns = vf.timestamp_ns;
+            fs.frame_interval_ns = prev_display_us && display_us > prev_display_us ? (display_us - prev_display_us) * 1000 : 0;
+            fs.video_decode_ns = (vf.picture_us - vf.received_us) * 1000;
+            fs.video_decoder_queue_ns = (taken_us - vf.picture_us) * 1000;
+            fs.rendering_ns = (now - taken_us) * 1000;
+            fs.vsync_queue_ns = (display_us - now) * 1000;
+            fs.total_pipeline_latency_ns = (display_us - sample_us) * 1000;
+            alvr_send_statistics(&fs);
+        }
+        prev_display_us = display_us;
     }
+    update_hud(now, fresh, take && !fresh);
     // Display frames without a new frame to show although the stream runs (the reserve was
     // empty), and the FIFO level seen.
     static unsigned repeats, takes, waiting_sum;
@@ -525,24 +706,31 @@ static bool render_video()
     if (now - stat_start >= 5000000) {
         VideoStats vs;
         video_get_stats(&vs);
-        static unsigned last_overflow, last_trimmed;
-        unsigned overflow, trimmed;
-        video_pacing_stats(&overflow, &trimmed);
+        static VideoPacingStats last;
+        VideoPacingStats ps;
+        video_pacing_stats(&ps);
+        // skip: frames never shown (display FIFO full, surplus skipped, conversion behind);
+        // late: frames that came after their display frame; arrival: gaps in the frames
+        // received (above 1.8x the usual interval), frames bunched (< 2 ms apart), longest gap.
         LOG("video: %.1f fps, rx %u dec %u drop %u lost %u err %u, decode %.1f ms (cpu %.1f), %.0f KB/frame, convert %.1f ms, "
-            "queue %u, m2p %.0f ms, head predicted %.0f ms (up to %.1f cm), pacing %s: repeat %u skip %u wait %.2f, "
+            "queue %u, m2p %.0f ms, head predicted %.0f ms (up to %.1f cm), pacing %s: repeat %u skip %u late %u "
+            "margin %.1f ms hold %.1f ms resync %u decode %.1f ms wait %.1f ms lead %.1f ms misses %u, arrival gaps %u bunched %u max %.0f ms, "
             "pose miss %u back %u old %u",
             shown * 1e6 / (double)(now - stat_start), vs.received, vs.decoded, vs.dropped, vs.lost, vs.errors,
             vs.decode_us_avg / 1000.0, vs.decode_cpu_us_avg / 1000.0, vs.bytes_avg / 1024.0, vs.convert_us_avg / 1000.0,
             vs.queue_max, m2p_avg_us / 1000.0, g_tracker_head_prediction_us / 1000.0, lead_max_cm,
-            g_paced ? "on" : "off", repeats, (overflow - last_overflow) + (trimmed - last_trimmed),
-            takes ? (double)waiting_sum / takes : 0.0, pose_misses, backwards, stale);
+            g_paced ? "on" : "off", repeats,
+            (ps.overflow - last.overflow) + (ps.trimmed - last.trimmed) + (ps.replaced - last.replaced),
+            ps.late - last.late, ps.margin_us / 1000.0, ps.hold_us / 1000.0, ps.resyncs - last.resyncs, g_decode_lat_us / 1000.0, g_wait_lat_us / 1000.0,
+            g_submit_lead_us / 1000.0, g_pass_misses, vs.arrival_gaps,
+            vs.arrival_bunched, vs.arrival_gap_max_us / 1000.0, pose_misses, backwards, stale);
         pose_misses = backwards = stale = 0;
         stat_start = now;
         shown = 0;
         lead_max_cm = 0;
         repeats = takes = waiting_sum = 0;
-        last_overflow = overflow;
-        last_trimmed = trimmed;
+        g_pass_misses = 0;
+        last = ps;
     }
     return ok;
 }
@@ -659,6 +847,7 @@ static bool render_lobby(Screen *s)
         rays[i].origin = c.pos;
         rays[i].dir = rotate(c.rot, v3(0, 0, -1));
         rays[i].trigger = c.trigger;
+        rays[i].seen = c.tracked;
     }
     // DualShock 4: laser from the light bar along the pad's forward (-Z), Cross clicks.
     {
@@ -669,6 +858,8 @@ static bool render_lobby(Screen *s)
         r.origin = d.pos;
         r.dir = rotate(d.rot, v3(0, 0, -1));
         r.trigger = (g_pad.buttons & PAD_BUTTON_CROSS) ? 1.0f : 0.0f;
+        r.seen = d.tracked;
+        r.scroll = g_pad.connected ? g_pad.ry : 0.0f; // right stick scrolls the settings
     }
     // Other users' controllers, labelled with the user number (no lasers).
     for (int k = 0; k < g_other_count && k < OTHER_USERS; k++) {
@@ -684,16 +875,28 @@ static bool render_lobby(Screen *s)
     if (g_wizard_pending && !settings_is_open() && !headset_lost(now))
         settings_open_wizard(v3(hp[0], hp[1], hp[2]));
     if (settings_is_open()) {
+        // Controllers that can point: connected and tracked (a Move the tracker refused cannot).
         int pointers_on = g_pad.connected && g_pad.track.registered;
         for (int i = 0; i < MOVE_MAX; i++)
-            pointers_on += g_moves[i].connected;
-        SettingsContext ctx{&g_config, floor_y, hp[1], pointers_on};
+            pointers_on += g_moves[i].connected && g_moves[i].track.registered;
+        SettingsContext ctx{&g_config, floor_y, hp[1], pointers_on, v3(hp[0], hp[1], hp[2])};
         int clicked = -1;
         unsigned actions = settings_update(ctx, rays, now, &clicked);
         if (clicked >= 0 && clicked < MOVE_MAX && lobby_haptics_allowed())
             move_vibrate(&g_moves[clicked], 150, 30);
         else if (clicked == MOVE_MAX && lobby_haptics_allowed())
             pad_vibrate(&g_pad, 0, 160, 40);
+        if ((actions & SETTINGS_VIBRATION_SET) && lobby_haptics_allowed()) { // a sample at the new strength
+            if (clicked >= 0 && clicked < MOVE_MAX)
+                move_vibrate(&g_moves[clicked], 255, 250);
+            else if (clicked == MOVE_MAX)
+                pad_vibrate(&g_pad, 255, 255, 250);
+        }
+        if ((actions & SETTINGS_CALIBRATED) && lobby_haptics_allowed()) { // height measured: a longer buzz
+            for (int i = 0; i < MOVE_MAX; i++)
+                move_vibrate(&g_moves[i], 200, 250);
+            pad_vibrate(&g_pad, 0, 200, 250);
+        }
         if (actions & SETTINGS_HEIGHT_CHANGED)
             g_floor_y = -g_config.camera_height_cm / 100.0f;
         if (actions & SETTINGS_RESET) {
@@ -709,8 +912,10 @@ static bool render_lobby(Screen *s)
     view.panel = &panel;
     view.floor_y = g_floor_y;
 
-    // Headset not initialized, or lost for 3 s: fade to black (0.5 s) with a message
-    // attached to the view. The app starts black: no fade-in at launch, only the fade-out.
+    // Headset lost by the camera for 3 s: the surroundings (grid, info, settings) fade to
+    // black in 0.5 s; the PS Camera and the controllers stay where they are. Headset
+    // tracking not started yet (the headset pose is then at the camera): only the camera
+    // is shown, 1.8 m ahead, blinking blue and red every 0.8 s.
     static float lost_black = 1.0f;
     static uint64_t last_us = now;
     const float step = (now - last_us) / 500000.0f;
@@ -720,11 +925,17 @@ static bool render_lobby(Screen *s)
     else
         lost_black = lost_black - step < 0.0f ? 0.0f : lost_black - step;
     view.brightness = 1.0f - lost_black;
-    view.overlay_text = "Headset not detected by PSCamera.";
-    view.overlay_brightness = lost_black;
+    view.overlay_text = nullptr;
+    if (!g_hmd_tracking_init) {
+        view.beacon = true;
+        view.beacon_pos = v3(hp[0], hp[1], hp[2] - 1.8f);
+        view.beacon_rgb = (now / 800000) % 2 ? 0xff4040 : 0x40c0ff;
+    }
+    // First launch: no grid while the floor is only a guess (until the height is set).
+    view.grid_visible = !(g_wizard_pending && !settings_wizard_height_set());
 
     // Info panel, once, far in front (towards the camera, 3 m beyond it).
-    static char info_lines[6][96];
+    static char info_lines[7][96];
     snprintf(info_lines[0], sizeof(info_lines[0]), "%s", ALVR_PS4_TITLE);
     AlvrStatus st;
     alvr_get_status(&st);
@@ -747,36 +958,65 @@ static bool render_lobby(Screen *s)
         snprintf(info_lines[1], sizeof(info_lines[1]), "SteamVR is restarting on %s...", st.server_ip);
         break;
     case ALVR_STREAMING:
-        snprintf(info_lines[1], sizeof(info_lines[1]), "Connected to %s (%ux%u, %.0f Hz) - %u video packets",
-                 st.server_ip, st.view_width, st.view_height, st.refresh_rate, st.video_packets);
+        if (g_stream_paused)
+            snprintf(info_lines[1], sizeof(info_lines[1]), "Connected to %s - the game is paused in the lobby",
+                     st.server_ip);
+        else
+            snprintf(info_lines[1], sizeof(info_lines[1]), "Connected to %s (%ux%u, %.0f Hz) - %u video packets",
+                     st.server_ip, st.view_width, st.view_height, st.refresh_rate, st.video_packets);
         break;
     }
     snprintf(info_lines[2], sizeof(info_lines[2]), "Hostname: %s", g_config.hostname);
     snprintf(info_lines[3], sizeof(info_lines[3]), "IP: %s", g_ip);
     snprintf(info_lines[4], sizeof(info_lines[4]), "Client v%s", ALVR_PS4_VERSION);
-    snprintf(info_lines[5], sizeof(info_lines[5]), "%s",
-             g_wizard_pending ? "" : "Press Start (PS Move) or Options (DualShock 4) to open settings");
-    for (int i = 0; i < 6; i++)
+    // How to open the settings, with the controllers that are connected.
+    bool any_move = false;
+    for (int i = 0; i < MOVE_MAX; i++)
+        any_move = any_move || g_moves[i].connected;
+    const char *open_hint = any_move && g_pad.connected ? "Press Start (PS Move) or Options (DualShock 4) to open settings"
+                            : any_move                 ? "Press Start on a PS Move to open settings"
+                            : g_pad.connected          ? "Press Options on the DualShock 4 to open settings"
+                                                       : "Connect a PS Move or a DualShock 4 to open settings";
+    snprintf(info_lines[5], sizeof(info_lines[5]), "%s", g_wizard_pending ? "" : open_hint);
+    int info_count = 6;
+    if (st.state == ALVR_STREAMING && !waiting_height) {
+        snprintf(info_lines[6], sizeof(info_lines[6]), "%s",
+                 g_stream_paused ? "Hold Cross (left Move) or Circle (right Move) to go back to the game"
+                                 : "Hold Cross (left Move) or Circle (right Move) for the lobby");
+        info_count = 7;
+    }
+    for (int i = 0; i < info_count; i++)
         view.info[i] = info_lines[i];
-    view.info[6] = nullptr;
+    view.info[info_count] = nullptr;
+    if (g_wizard_pending) // nothing behind the first launch wizard
+        view.info[0] = nullptr;
     view.info_pos = v3(0.0f, g_floor_y + 1.6f, -3.0f);
     view.info_yaw = 0.0f;
     // Each eye gets its own 960x1080 image with pitch == width: with both eyes in one
     // 1920-wide buffer the compositor ignored the pitch and mixed the eyes row by row.
     static uint32_t *eye_buf[2][2]; // [double-buffer index][eye]
+    static bool alloc_failed;       // not retried at every frame
     const int eye_w = 960, eye_h = 1080;
     if (!eye_buf[0][0]) {
+        if (alloc_failed)
+            return false;
         const size_t each = (size_t)eye_w * eye_h * 4, align = 0x10000;
         const size_t total = (each * 4 + align - 1) / align * align;
         off_t phys = 0;
         void *mem = nullptr;
         // WB onion (type 0), CPU-cached: the renderer reads pixels back (AA blending),
         // which is extremely slow on write-combined garlic memory. The GPU reads onion too.
-        if (sceKernelAllocateDirectMemory(0, sceKernelGetDirectMemorySize(), total, align, 0, &phys) < 0 ||
-            sceKernelMapDirectMemory(&mem, total, 0x33, 0, phys, align) < 0) {
+        alloc_failed = true;
+        if (sceKernelAllocateDirectMemory(0, sceKernelGetDirectMemorySize(), total, align, 0, &phys) < 0) {
             LOG("lobby: eye buffer allocation failed");
             return false;
         }
+        if (sceKernelMapDirectMemory(&mem, total, 0x33, 0, phys, align) < 0) {
+            LOG("lobby: eye buffer mapping failed");
+            sceKernelReleaseDirectMemory(phys, total);
+            return false;
+        }
+        alloc_failed = false;
         for (int i = 0; i < 4; i++)
             eye_buf[i / 2][i % 2] = (uint32_t *)((char *)mem + each * i);
     }
@@ -826,6 +1066,8 @@ static bool render_lobby(Screen *s)
 static void haptics_to_move(int hand, float duration_s, float frequency, float amplitude)
 {
     (void)frequency;
+    if (g_stream_paused) // in the lobby: the game's vibrations are ignored
+        return;
     // ALVR hand 0 = left, 1 = right; Move index 0 is the right hand.
     int index = hand == 1 ? 0 : 1;
     float a = amplitude < 0 ? 0 : amplitude > 1 ? 1 : amplitude;
@@ -927,6 +1169,8 @@ static void send_alvr_uplink()
         in.system = w.system;
         in.trigger = w.trigger;
         in.trigger_click = w.trigger_click;
+        if (g_stream_paused) // in the lobby: SteamVR sees every button released
+            memset(&in, 0, sizeof(in));
         alvr_update_input(hand, &in);
     }
     remember_sent_pose(now * 1000ull);
@@ -952,6 +1196,7 @@ static void wait_for_headset(Screen *s)
         return;
     }
     const bool dialog = hmd_setup_init(g_probes[10].handle, g_probes[11].handle);
+    vr_service_dialog_init(g_probes[12].handle);
     uint32_t last_status = 0xffffffff;
     uint64_t status_since = 0, next_try_us = 0;
     for (;;) {
@@ -987,7 +1232,7 @@ static void wait_for_headset(Screen *s)
 static void monitor_headset(unsigned frame, uint64_t now)
 {
     static bool lost = false;
-    static uint64_t status_since = 0, next_try_us = 0;
+    static uint64_t status_since = 0, next_try_us = 0, reopen_retry_us = 0;
     if (!g_hmd.initialized)
         return;
     if (frame % 15 == 0) {
@@ -1007,14 +1252,58 @@ static void monitor_headset(unsigned frame, uint64_t now)
         if (!g_in_background && !hmd_setup_running() && now >= next_try_us &&
             (status != HMD_STATUS_NOT_READY || now - status_since > 1000000) && !hmd_setup_start(g_user_id))
             next_try_us = now + 2000000;
-    } else if (lost && !hmd_setup_running()) {
+    } else if (lost && !hmd_setup_running() && now >= reopen_retry_us) {
+        if (!hmd_handle_valid(&g_hmd)) {
+            // A reopen too early after the power cycle can fail: tried again every second.
+            if (!hmd_reopen(g_user_id, &g_hmd)) {
+                LOG("headset ready again, but it cannot be opened yet: retrying in 1 s");
+                reopen_retry_us = now + 1000000;
+                return;
+            }
+            tracker_reregister_hmd(g_hmd.handle);
+        }
         lost = false;
         LOG("headset ready again");
-        if (!hmd_handle_valid(&g_hmd) && hmd_reopen(g_user_id, &g_hmd))
-            tracker_reregister_hmd(g_hmd.handle);
         g_hmd_tracking_init = false;
         g_hmd_init_after_us = now + 300000;
     }
+}
+
+// Headset tracking not started for 10 s while the headset moves (it is worn, not lying
+// somewhere the camera cannot see): the system's "confirm your position" screen is opened,
+// once per run (VR service dialog, as VR Worlds does).
+static void confirm_position_if_stuck(uint64_t now)
+{
+    static uint64_t since;
+    static bool opened, have_ref, moved;
+    static Quat ref;
+    vr_service_dialog_poll();
+    if (opened)
+        return;
+    if (g_hmd_tracking_init || g_in_background || hmd_setup_running() || !g_hmd.initialized) {
+        since = 0;
+        have_ref = moved = false;
+        return;
+    }
+    if (!since)
+        since = now;
+    const TrackerPose &d = g_tracker.device_pose;
+    const Quat q{d.qx, d.qy, d.qz, d.qw};
+    if (q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w > 0.5f) {
+        if (!have_ref) {
+            ref = q;
+            have_ref = true;
+        } else if (!moved) {
+            // Turned more than 10 degrees from where it was when the wait started.
+            const float dot = fabsf(ref.x * q.x + ref.y * q.y + ref.z * q.z + ref.w * q.w);
+            if (dot < cosf(0.5f * 10.0f * 0.0174533f)) {
+                moved = true;
+                LOG("headset moving while its tracking has not started");
+            }
+        }
+    }
+    if (moved && now - since >= 10000000 && vr_service_dialog_open())
+        opened = true;
 }
 
 // Other users logged in on the console (checked every 3 s): their PS Moves and DualShock 4
@@ -1068,6 +1357,70 @@ static void update_pad_rumble(bool pc_connected)
         pad_vibrate(&g_pad, 0, 0, 0);
 }
 
+// Lobby while streaming: holding the button each PS Move has no use for in the Vive wand
+// mapping (Cross on the left Move, Circle on the right one; wand.cpp) for 1 s switches to
+// the lobby, and again back to the stream (a fresh IDR frame is requested). Either Move's
+// button alone does it.
+static const uint64_t LOBBY_HOLD_US = 1000000;
+
+static void handle_lobby_toggle(uint64_t now, bool pc_connected)
+{
+    static uint64_t held_since[MOVE_MAX];
+    static bool fired; // toggled: again only once both buttons are released (both held = one toggle)
+    // The first launch wizard (also after a settings Reset while connected) keeps the lobby:
+    // the stream is paused until it is confirmed.
+    static bool wizard_paused;
+    if (pc_connected && g_wizard_pending && !g_stream_paused) {
+        g_stream_paused = true;
+        wizard_paused = true;
+        video_set_paused(true);
+        LOG("stream: paused for the first launch wizard");
+    } else if (wizard_paused && !g_wizard_pending) {
+        wizard_paused = false;
+        if (g_stream_paused && pc_connected) {
+            g_stream_paused = false;
+            video_set_paused(false);
+            LOG("stream: wizard confirmed, back to the game");
+        }
+    }
+    if (!pc_connected) {
+        wizard_paused = false;
+        if (g_stream_paused) {
+            g_stream_paused = false;
+            video_set_paused(false);
+            LOG("stream: PC disconnected while in the lobby");
+        }
+        memset(held_since, 0, sizeof(held_since));
+        fired = false;
+        return;
+    }
+    if (g_wizard_pending)
+        return;
+    bool any_held = false;
+    for (int i = 0; i < MOVE_MAX; i++) {
+        const uint16_t button = move_index_hand(i) == HAND_LEFT ? MOVE_BUTTON_CROSS : MOVE_BUTTON_CIRCLE;
+        if (!g_moves[i].connected || !(g_moves[i].buttons & button)) {
+            held_since[i] = 0;
+            continue;
+        }
+        any_held = true;
+        if (!held_since[i])
+            held_since[i] = now;
+        if (fired || now - held_since[i] < LOBBY_HOLD_US)
+            continue;
+        fired = true;
+        g_stream_paused = !g_stream_paused;
+        video_set_paused(g_stream_paused);
+        if (!g_stream_paused)
+            settings_close();
+        move_vibrate(&g_moves[i], 200, 120);
+        LOG("stream: %s (%s held)", g_stream_paused ? "lobby" : "back to the game",
+            move_index_hand(i) == HAND_LEFT ? "left Cross" : "right Circle");
+    }
+    if (!any_held)
+        fired = false;
+}
+
 // START on either Move, or OPTIONS on the DualShock 4, opens / closes the settings in the
 // lobby (not while the lobby is black: headset not detected). While streaming, START is
 // SteamVR's system button.
@@ -1095,6 +1448,7 @@ int main()
     setvbuf(stdout, nullptr, _IONBF, 0);
     log_init();
     LOG("%s client v%s starting", ALVR_PS4_TITLE, ALVR_PS4_VERSION);
+    detect_ps4_model();
 
     read_ip();
     init_user();
@@ -1149,17 +1503,23 @@ int main()
         alvr_get_status(&alvr_st);
         bool pc_connected = alvr_st.state == ALVR_STREAMING;
         update_tracking_state(pc_connected);
-        update_pad_rumble(pc_connected);
+        confirm_position_if_stuck(now);
+        handle_lobby_toggle(now, pc_connected);
+        const bool in_stream = pc_connected && !g_stream_paused; // the game is shown
+        update_pad_rumble(in_stream);
+        move_set_vibration_strength(g_config.vibration_percent);
+        pad_set_vibration_strength(g_config.vibration_percent);
+        video_set_frame_period(g_display_hz == 90 ? 1000000 / 90 : 1000000 / 60);
         for (int i = 0; i < MOVE_MAX; i++) {
             WandInput prev = g_wand_emu[i].last;
             wand_update(&g_wand_emu[i], move_index_hand(i), g_moves[i], &g_wand[i]);
             const WandInput &w = g_wand[i];
-            // Lobby haptics feedback, only while no PC is connected (then ALVR drives the
+            // Lobby haptics feedback, only while the game is not shown (then ALVR drives the
             // motors): a tick on pad click and grip, a longer buzz on a full trigger pull
             // (not while the settings are open: the trigger clicks their buttons).
-            if (!pc_connected && ((w.pad_click && !prev.pad_click) || (w.grip && !prev.grip)))
+            if (!in_stream && ((w.pad_click && !prev.pad_click) || (w.grip && !prev.grip)))
                 move_vibrate(&g_moves[i], 150, 40);
-            if (!pc_connected && !settings_is_open() && w.trigger >= 0.9f && prev.trigger < 0.9f)
+            if (!in_stream && !settings_is_open() && w.trigger >= 0.9f && prev.trigger < 0.9f)
                 move_vibrate(&g_moves[i], 220, 120);
             if (w.pad_click != prev.pad_click || w.grip != prev.grip || w.menu != prev.menu ||
                 w.system != prev.system || w.trigger_click != prev.trigger_click)
@@ -1178,7 +1538,18 @@ int main()
             if (g_tracker.results_ok && g_tracker.orientation_quality != 0)
                 lobby_started = true;
             // A video bench clip is shown like a stream (Dev build).
-            bool stereo_video = (pc_connected || bench_active()) && render_video();
+            const bool video_on = in_stream || bench_active();
+            if (!video_on)
+                video_not_shown();
+            bool stereo_video = video_on && render_video();
+            if (stereo_video && g_loop_resume_us) {
+                // Only from a wake-up of this iteration (a stale one gave a 15 s "work time",
+                // hence a 15 s lead: the submission never came before the pass).
+                const uint64_t work = sceKernelGetProcessTime() - g_loop_resume_us;
+                if (work < g_pass_period_us)
+                    g_loop_work_us = work > g_loop_work_us ? work : g_loop_work_us - g_loop_work_us / 64;
+            }
+            g_loop_resume_us = 0;
             bool stereo = stereo_video;
             g_lobby_shown = false;
             if (!stereo) {
@@ -1211,8 +1582,8 @@ int main()
                 next_us = now_us;
             next_us += 1000000 / (g_display_hz == 90 ? 90 : 60);
             if (stereo_video) {
-                // Next compositor pass (paced), or the next converted frame.
-                if (!g_paced || !reproj_wait_frame(25000))
+                // Just before the next compositor pass (paced), or the next converted frame.
+                if (!g_paced || !pass_wait_and_lead())
                     video_wait_new(video_published_seq(), 25000);
                 next_us = 0;
             } else if (next_us > now_us) {

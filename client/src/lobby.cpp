@@ -196,7 +196,7 @@ static void fill_quad3d(const EyeTarget &t, Vec3 a, Vec3 b, Vec3 c, Vec3 d, uint
     fill_poly_view(t, q, 4, rgb);
 }
 
-static void draw_scene(const EyeTarget &t, const LobbyView *view)
+static void draw_grid(const EyeTarget &t, const LobbyView *view)
 {
     // Floor grid, 1 m cells aligned on the play space centre, fading with distance.
     const int half = 12;
@@ -207,16 +207,19 @@ static void draw_scene(const EyeTarget &t, const LobbyView *view)
         line3d(t, v3(cx + i, y, cz - half), v3(cx + i, y, cz + half), c);
         line3d(t, v3(cx - half, y, cz + i), v3(cx + half, y, cz + i), c);
     }
+}
 
-    // PS Camera placeholder: a small wireframe box at the tracker origin.
+// PS Camera placeholder: a small wireframe box (the tracker origin is the camera).
+static void draw_camera(const EyeTarget &t, Vec3 at, uint32_t rgb)
+{
     const float w = 0.10f, h = 0.03f, d = 0.03f;
     Vec3 p[8];
     for (int k = 0; k < 8; k++)
-        p[k] = v3(k & 1 ? w : -w, k & 2 ? h : -h, k & 4 ? d : -d);
+        p[k] = at + v3(k & 1 ? w : -w, k & 2 ? h : -h, k & 4 ? d : -d);
     static const int edges[12][2] = {{0, 1}, {2, 3}, {4, 5}, {6, 7}, {0, 2}, {1, 3},
                                      {4, 6}, {5, 7}, {0, 4}, {1, 5}, {2, 6}, {3, 7}};
     for (auto &e : edges)
-        line3d(t, p[e[0]], p[e[1]], PIXEL_ALPHA | 0x40c0ff);
+        line3d(t, p[e[0]], p[e[1]], PIXEL_ALPHA | rgb);
 }
 
 // Stroke text on a plane: origin at the baseline start, `right`/`up` unit axes.
@@ -662,6 +665,13 @@ static void draw_panel(const EyeTarget &t, const LobbyPanel &p)
             draw_text3d(t, at(tx, ty), p.right, p.up, it.text_h, it.text, PIXEL_ALPHA | it.text_rgb);
         }
     }
+    for (int i = 0; i < p.shape_count; i++) {
+        const LobbyPanelShape &s = p.shapes[i];
+        if (s.r > 0.0f)
+            circle3d(t, at(s.x0, s.y0), p.right, p.up, s.r, PIXEL_ALPHA | s.rgb);
+        else
+            line3d(t, at(s.x0, s.y0), at(s.x1, s.y1), PIXEL_ALPHA | s.rgb);
+    }
 }
 
 static void draw_pointer(const EyeTarget &t, const LobbyPointer &ptr, const LobbyPanel *panel)
@@ -707,26 +717,35 @@ void lobby_render_eye(uint32_t *pixels, int width, int height, int pitch, const 
     t.inv_rot = conj(view->eye_rot[eye]);
     t.fov = view->fov[eye];
     const float b = view->brightness;
-    if (b <= 0.004f) {
+    if (view->beacon) {
         fill(pixels, width, height, pitch, PIXEL_ALPHA);
+        draw_camera(t, view->beacon_pos, view->beacon_rgb);
     } else {
-        fill(pixels, width, height, pitch, PIXEL_ALPHA | 0x06080c);
-        draw_scene(t, view);
-        if (view->info[0])
-            draw_info_panel(t, view);
-        if (view->panel && view->panel->visible)
-            draw_panel(t, *view->panel);
+        // The surroundings, faded with the brightness; then the camera and the controllers
+        // at full brightness.
+        if (b <= 0.004f) {
+            fill(pixels, width, height, pitch, PIXEL_ALPHA);
+        } else {
+            fill(pixels, width, height, pitch, PIXEL_ALPHA | 0x06080c);
+            if (view->grid_visible)
+                draw_grid(t, view);
+            if (view->info[0])
+                draw_info_panel(t, view);
+            if (view->panel && view->panel->visible)
+                draw_panel(t, *view->panel);
+            for (auto &ptr : view->pointers)
+                if (ptr.visible)
+                    draw_pointer(t, ptr, view->panel);
+            if (b < 0.996f)
+                darken(pixels, width, height, pitch, (uint32_t)(b * 256.0f));
+        }
+        draw_camera(t, v3(0, 0, 0), 0x40c0ff);
         for (auto &c : view->controllers)
             if (c.visible)
                 draw_controller(t, c);
         for (auto &p : view->pads)
             if (p.visible)
                 draw_pad(t, p, view->time_s);
-        for (auto &ptr : view->pointers)
-            if (ptr.visible)
-                draw_pointer(t, ptr, view->panel);
-        if (b < 0.996f)
-            darken(pixels, width, height, pitch, (uint32_t)(b * 256.0f));
     }
     // Text attached to the view, 2 m ahead of the head.
     if (view->overlay_text && view->overlay_brightness > 0.004f) {

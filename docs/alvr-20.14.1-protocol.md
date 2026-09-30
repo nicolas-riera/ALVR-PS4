@@ -217,7 +217,8 @@ a2 07 2d be da d8 21 e5     device_id  0xe521d8dabe2d07a2
 ea 1c 3d 6d 42 d9 2b 49     profile_id 0x492bd9426d3d1cea
 ```
 
-`PlayspaceSync(Some(Vec2(2.0, 2.0)))`:
+`PlayspaceSync(Some(Vec2(2.0, 2.0)))` (the PS4 client sends 1.9 x 2.4, see
+`alvr_client.cpp`):
 
 ```
 00 00 00 0d  00 00 00 00  01  00 00 00 40  00 00 00 40
@@ -763,8 +764,12 @@ There is **no per-frame ACK / "VideoFrameReceived" packet** in 20.14.1. The clie
 
 * `ClientControlPacket::RequestIdr` (control socket) at start and whenever a packet was lost
   (`had_packet_loss` on a non-IDR frame) or the decoder could not accept a frame.
-* `ClientStatistics` on stream 4 once per displayed frame (optional but used for latency graphs,
-  adaptive bitrate and controller prediction):
+* `ClientStatistics` on stream 4 once per displayed frame (optional; used for the dashboard's
+  latency and fps graphs and statistics summary, and by the adaptive bitrate mode. In 20.14.1 it
+  does not drive any prediction: `get_motion_to_photon_latency` is commented out and returns 0,
+  `tracker_pose_time_offset` is the constant `steamvr_pipeline_frames` x frame interval, and
+  `GameRenderLatencyFeedback` only triggers a driver resync on Linux). The server matches it to
+  the frame by `target_timestamp` in its history (frames whose tracking it received):
 
 ```rust
 pub struct ClientStatistics {
@@ -840,6 +845,10 @@ Head-only packet = 87 bytes; head + 2 controllers = 207 bytes (always a single s
   the floor**. SteamVR uses the same convention; the driver copies values straight into
   `DriverPose_t` (`Controller::OnPoseUpdate`, `Hmd::OnPoseUpdated`). Head `y` should be the height
   above the floor (≈1.6 m standing) because the default recentering keeps `y`.
+  The server's `TrackingManager` lives as long as the driver (not per connection): its
+  `last_head_pose` survives a reconnection, and the recentering done on each `PlayspaceSync`
+  uses it. With the default modes (LocalFloor + Yaw) a client that reconnects gets the play
+  area turned to where the head faced before; the PS4 setup sets both modes to Disabled.
 * Quaternion order on the wire: **x, y, z, w**, unit length.
 * `linear_velocity` in m/s and `angular_velocity` in rad/s, both expressed in the **world (stage)
   frame** (as OpenXR `XrSpaceVelocity`); the server converts angular velocity to the local frame

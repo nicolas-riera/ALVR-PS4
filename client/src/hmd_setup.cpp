@@ -28,6 +28,15 @@ struct HmdSetupDialogResult {
     uint8_t reserved[32];
 };
 
+// sceVrServiceDialogOpen checks size 0x68, mode < 3 and bytes 0x3d-0x67 zero.
+struct VrServiceDialogParam {
+    CommonDialogBaseParam base;
+    uint64_t size; // 0x68
+    uint32_t mode; // 0 in VR Worlds
+    uint8_t reserved[44];
+};
+
+static_assert(sizeof(VrServiceDialogParam) == 0x68, "VrServiceDialogParam size");
 static_assert(sizeof(CommonDialogBaseParam) == 0x30, "CommonDialogBaseParam size");
 static_assert(sizeof(HmdSetupDialogParam) == 0x68, "HmdSetupDialogParam size");
 static_assert(sizeof(HmdSetupDialogResult) == 0x24, "HmdSetupDialogResult size");
@@ -43,6 +52,7 @@ static int (*p_get_result)(HmdSetupDialogResult *);
 static int (*p_terminate)();
 
 static bool g_ready_to_use, g_running;
+static bool g_vr_ready, g_vr_running; // VR service dialog (end of the file)
 static HmdSetupDialogParam g_param;
 
 static bool resolve(int module, const char *name, void *fn)
@@ -87,7 +97,7 @@ static int open_dialog()
 
 bool hmd_setup_start(int user_id)
 {
-    if (!g_ready_to_use)
+    if (!g_ready_to_use || g_vr_running) // one common dialog at a time
         return false;
     if (g_running)
         return true;
@@ -117,6 +127,12 @@ HmdSetupState hmd_setup_poll()
     if (!g_running)
         return HMD_SETUP_IDLE;
     int status = p_update_status();
+    if (status < 0) { // the dialog is gone without finishing: not "running" forever
+        LOG("hmd setup dialog: UpdateStatus -> 0x%08x, closed", (unsigned)status);
+        p_terminate();
+        g_running = false;
+        return HMD_SETUP_FAILED;
+    }
     if (status != STATUS_FINISHED)
         return HMD_SETUP_RUNNING;
     HmdSetupDialogResult r;
@@ -133,4 +149,69 @@ HmdSetupState hmd_setup_poll()
     p_terminate();
     g_running = false;
     return rc == 0 && r.result == 0 ? HMD_SETUP_DONE : HMD_SETUP_FAILED;
+}
+
+// ---- VR service dialog ------------------------------------------------------------------
+
+static int (*p_vr_initialize)();
+static int (*p_vr_open)(const VrServiceDialogParam *);
+static int (*p_vr_update_status)();
+static int (*p_vr_get_result)(HmdSetupDialogResult *); // same 0x24-byte shape (result, reserved)
+static int (*p_vr_terminate)();
+static VrServiceDialogParam g_vr_param;
+
+bool vr_service_dialog_init(int module)
+{
+    if (module < 0 || !g_ready_to_use) // the common dialog is initialized by hmd_setup_init
+        return false;
+    g_vr_ready = resolve(module, "sceVrServiceDialogInitialize", &p_vr_initialize) &&
+                 resolve(module, "sceVrServiceDialogOpen", &p_vr_open) &&
+                 resolve(module, "sceVrServiceDialogUpdateStatus", &p_vr_update_status) &&
+                 resolve(module, "sceVrServiceDialogGetResult", &p_vr_get_result) &&
+                 resolve(module, "sceVrServiceDialogTerminate", &p_vr_terminate);
+    return g_vr_ready;
+}
+
+bool vr_service_dialog_open()
+{
+    if (!g_vr_ready || g_vr_running || g_running) // one common dialog at a time
+        return false;
+    int rc = p_vr_initialize();
+    if (rc < 0 && rc != ERR_ALREADY_INITIALIZED) {
+        LOG("sceVrServiceDialogInitialize -> 0x%08x", (unsigned)rc);
+        return false;
+    }
+    memset(&g_vr_param, 0, sizeof(g_vr_param));
+    g_vr_param.base.size = sizeof(CommonDialogBaseParam);
+    g_vr_param.base.magic = COMMON_DIALOG_MAGIC + (uint32_t)(uintptr_t)&g_vr_param;
+    g_vr_param.size = sizeof(VrServiceDialogParam);
+    g_vr_param.mode = 0;
+    rc = p_vr_open(&g_vr_param);
+    LOG("sceVrServiceDialogOpen(mode 0) -> 0x%08x", (unsigned)rc);
+    if (rc < 0) {
+        p_vr_terminate();
+        return false;
+    }
+    g_vr_running = true;
+    return true;
+}
+
+bool vr_service_dialog_running()
+{
+    return g_vr_running;
+}
+
+void vr_service_dialog_poll()
+{
+    if (!g_vr_running)
+        return;
+    const int status = p_vr_update_status();
+    if (status >= 0 && status != STATUS_FINISHED)
+        return;
+    HmdSetupDialogResult r;
+    memset(&r, 0, sizeof(r));
+    const int rc = status < 0 ? status : p_vr_get_result(&r);
+    LOG("VR service dialog finished: status %d, GetResult -> 0x%08x, result %d", status, (unsigned)rc, r.result);
+    p_vr_terminate();
+    g_vr_running = false;
 }

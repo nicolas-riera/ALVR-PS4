@@ -1,9 +1,12 @@
 // Host-side preview of the lobby renderer: writes a side-by-side PPM.
 // Build (WSL):
 //   g++ -O2 -I client/src tools/test/lobby_preview.cpp client/src/lobby.cpp client/src/settings.cpp -o /tmp/lobby_preview
-// Usage: lobby_preview out.ppm [yaw] [mode]   mode: 0 lobby, 1 settings open, 2 headset lost (black + text),
+// Usage: lobby_preview out.ppm [yaw] [mode]   mode: 0 lobby, 1 settings open, 2 headset lost (surroundings black),
 //                                             3 close-up of the controllers (buttons, battery),
-//                                             4 first launch wizard, 5 close-up of the DualShock 4
+//                                             4 first launch wizard, 5 close-up of the DualShock 4,
+//                                             6 height calibration (from the settings), 7 the same from the wizard,
+//                                             8 settings scrolled to the bottom, 9 surface test (build with
+//                                             -DALVR_PS4_DEV=1), 10 headset tracking not started (camera only)
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -126,28 +129,87 @@ int main(int argc, char **argv)
     v.info_pos = v3(0.0f, v.floor_y + 1.6f, -3.0f);
     v.info_yaw = 0.0f;
     v.brightness = 1.0f;
+    v.grid_visible = true;
     static LobbyPanel panel;
-    if (mode == 1 || mode == 4) {
+    if (mode == 1 || mode == 4 || mode == 6 || mode == 7 || mode == 8 || mode == 9) {
         ClientConfig cfg;
         memset(&cfg, 0, sizeof(cfg));
         cfg.resolution_percent = 130;
         cfg.center_on_connect = 1;
         cfg.refresh_rate = 90;
-        if (mode == 4)
+        const bool wizard = mode == 4 || mode == 7;
+        if (wizard)
             settings_open_wizard(head);
         else
             settings_open(head);
-        SettingsContext ctx{&cfg, v.floor_y, head.y, 2};
+        SettingsContext ctx{&cfg, v.floor_y, head.y, 2, head};
         int clicked;
+        cfg.vibration_percent = 70;
         settings_update(ctx, rays, 1000000, &clicked);
         settings_update(ctx, rays, 1016000, &clicked);
+        if (mode == 8) { // DualShock 4 right stick held down for 1 s: scrolled to the bottom
+            SettingsRay r[LOBBY_POINTERS];
+            memcpy(r, rays, sizeof(r));
+            r[2].scroll = -1.0f;
+            for (int k = 0; k < 60; k++)
+                settings_update(ctx, r, 1032000 + k * 16000, &clicked);
+        }
+        if (mode == 9) { // Dev surface test: open the calibration, click "Surface test", press Cross
+            SettingsRay r[LOBBY_POINTERS];
+            memcpy(r, rays, sizeof(r));
+            auto aim = [&](Vec3 target) {
+                Vec3 d = target - r[0].origin;
+                const float n = sqrtf(d.x * d.x + d.y * d.y + d.z * d.z);
+                r[0].dir = d * (1.0f / n);
+            };
+            uint64_t t = 1032000;
+            aim(head + v3(0.40f, -0.12f + 0.095f, -0.85f));
+            r[0].trigger = 1.0f;
+            settings_update(ctx, r, t += 16000, &clicked);
+            r[0].trigger = 0.0f;
+            settings_update(ctx, r, t += 16000, &clicked);
+            aim(head + v3(-0.36f, -0.12f - 0.395f, -0.85f));
+            r[0].trigger = 1.0f;
+            settings_update(ctx, r, t += 16000, &clicked);
+            r[0].trigger = 0.0f;
+            r[0].dir = rays[0].dir;
+            for (int i = 0; i < LOBBY_POINTERS; i++)
+                r[i].seen = true;
+            settings_update(ctx, r, t += 16000, &clicked);
+            r[2].trigger = 1.0f;
+            settings_update(ctx, r, t += 16000, &clicked);
+        }
+        if (mode == 6 || mode == 7) {
+            // Click "Calibrate" with Move 0 (panel 0.85 m ahead, 0.12 m below the head).
+            const Vec3 target = head + v3(wizard ? 0.34f : 0.40f, -0.12f + (wizard ? -0.070f : 0.095f), -0.85f);
+            SettingsRay r[LOBBY_POINTERS];
+            memcpy(r, rays, sizeof(r));
+            Vec3 d = target - r[0].origin;
+            const float n = sqrtf(d.x * d.x + d.y * d.y + d.z * d.z);
+            r[0].dir = d * (1.0f / n);
+            r[0].trigger = 1.0f;
+            settings_update(ctx, r, 1032000, &clicked);
+            // Calibration shown: both Moves seen, Move 1 lowered near the floor, then the
+            // DualShock 4 presses Cross away from the floor (a hint appears).
+            r[0].trigger = 0.0f;
+            r[0].dir = rays[0].dir;
+            for (int i = 0; i < LOBBY_POINTERS; i++)
+                r[i].seen = true;
+            r[1].origin = v3(0.1f, v.floor_y + 0.03f, 0.55f);
+            v.controllers[1].pos = r[1].origin;
+            settings_update(ctx, r, 1048000, &clicked);
+            r[2].trigger = 1.0f;
+            settings_update(ctx, r, 1064000, &clicked);
+        }
         settings_build(&panel, v.pointers);
         v.panel = &panel;
     }
-    if (mode == 2) {
+    if (mode == 2) // headset lost: the surroundings black, the camera and the controllers stay
         v.brightness = 0.0f;
-        v.overlay_text = "Headset not detected by PSCamera.";
-        v.overlay_brightness = 1.0f;
+    if (mode == 10) { // headset tracking not started: only the camera, ahead
+        v.beacon = true;
+        v.beacon_pos = head + v3(0, 0, -1.8f);
+        v.beacon_rgb = 0xff4040;
     }
     lobby_render(px, W, H, W, &v);
     FILE *f = fopen(argc > 1 ? argv[1] : "lobby.ppm", "wb");

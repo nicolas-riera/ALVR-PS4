@@ -4,7 +4,7 @@ the stream, and which encoder settings it copes with best.
 Each test encodes a clip on the PC (ffmpeg + NVENC, with the settings ALVR 20.14.1 uses:
 CBR, one-frame VBV, infinite GOP, no B-frames, CAVLC, quarter-resolution multipass,
 spatial AQ, preset P4 low latency), sends it to the PS4 (TCP 9955), which plays it through
-its real video pipeline (queue, hardware decoder, foveation expansion, headset display)
+its real video pipeline (queue, decoder, foveation expansion, headset display)
 and sends the timings back. One parameter changes per test.
 
   python tools/video_bench.py                        quick plan, newest ALVR recording as source
@@ -76,6 +76,29 @@ def nal_units(data):
         if h < e:
             out.append((data[h] & 0x1F, b"\x00\x00\x00\x01" + data[h:e]))
     return out
+
+
+def access_units_hevc(data):
+    """HEVC: config (VPS + SPS + PPS), [(is_idr, frame bytes without them)]."""
+    config, frames, cur, cur_idr = b"", [], [], False
+    for _, nal in nal_units(data):
+        t = (nal[4] >> 1) & 0x3F
+        if t in (32, 33, 34):
+            if not frames and not cur and nal not in config:
+                config += nal
+            continue
+        if t < 32:  # slice segments
+            first_slice = nal[6] & 0x80 != 0
+            if first_slice and cur:
+                frames.append((cur_idr, b"".join(cur)))
+                cur, cur_idr = [], False
+            cur.append(nal)
+            cur_idr = cur_idr or t in (19, 20, 21)
+    if cur:
+        frames.append((cur_idr, b"".join(cur)))
+    while frames and not frames[0][0]:
+        frames.pop(0)
+    return config, frames
 
 
 def access_units(data):
@@ -171,6 +194,16 @@ def encode(source, size, t, frames, fps, out_path):
     else:
         inp = ["-f", "lavfi", "-i", f"testsrc2=size={w}x{h}:rate={fps}"]
         vf = "noise=alls=10:allf=t,format=yuv420p"
+    if t.get("codec") == "hevc":  # ALVR's HEVC settings: CBR, no B-frames, infinite GOP, low latency
+        cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error"] + inp + [
+            "-frames:v", str(frames), "-vf", vf, "-pix_fmt", "yuv420p",
+            "-c:v", "hevc_nvenc", "-preset", t.get("preset", "p4"), "-tune", t.get("tune", "ll"), "-profile:v", "main",
+            "-rc", "cbr", "-b:v", f"{b}M", "-maxrate", f"{b}M", "-bufsize", str(bufsize),
+            "-multipass", t.get("multipass", "qres"), "-spatial-aq", str(t.get("aq", 1)),
+            "-g", "100000", "-bf", "0", "-no-scenecut", "1", "-zerolatency", "1", "-forced-idr", "1",
+            "-color_range", "pc", "-f", "hevc", out_path]
+        subprocess.run(cmd, check=True)
+        return
     cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error"] + inp + [
         "-frames:v", str(frames), "-vf", vf, "-pix_fmt", "yuv420p",
         "-c:v", "h264_nvenc", "-preset", t.get("preset", "p4"), "-tune", t.get("tune", "ll"),
@@ -221,8 +254,11 @@ def plans(fps):
     quick = [t("ALVR recording as it is", raw=True), t("80 Mbps (current)"), t("60 Mbps", mbps=60),
              t("120 Mbps", mbps=120), t("max speed 60 Mbps", fps=0), size[2], encoder[0]]
     pacing = [t("80 Mbps (current)")]  # one test: watch the "pacing" figures of the PS4 log
+    # H.264 against HEVC (both decoded by the same software decoder; HEVC was slower, 2026-09-30).
+    hevc = [t("H.264 (current)"), t("HEVC", codec="hevc")]
     return {"quick": quick, "pacing": pacing, "bitrate": bitrate + throughput, "encoder": encoder, "size": size,
-            "pipeline": pipeline, "full": bitrate + throughput + encoder + size + pipeline}
+            "pipeline": pipeline, "hevc": hevc,
+            "full": bitrate + throughput + encoder + size + pipeline}
 
 
 # ---- PS4 link -------------------------------------------------------------------------------------------
@@ -240,7 +276,7 @@ def recv_all(sock, n):
 def run_test(sock, t, config, frames, loops):
     ffe = t["ffe"]
     header = dict(name=t["name"], view_w=VIEW[0], view_h=VIEW[1], full_range=1, fps=t["fps"], loops=loops,
-                  depth=t.get("depth", 3), jobs=t.get("jobs", 4))
+                  depth=t.get("depth", 3), jobs=t.get("jobs", 4), codec=1 if t.get("codec") == "hevc" else 0)
     if ffe:
         header.update(ffe_center_x=ffe["center_x"], ffe_center_y=ffe["center_y"], ffe_shift_x=ffe["shift_x"],
                       ffe_shift_y=ffe["shift_y"], ffe_ratio_x=ffe["ratio_x"], ffe_ratio_y=ffe["ratio_y"])
@@ -329,7 +365,8 @@ def main():
             else:
                 clip = os.path.join(tmp, f"t{i}.h264")
                 encode(source, size, t, a.frames, int(a.fps) if a.fps else 90, clip)
-                config, frames = access_units(open(clip, "rb").read())
+                au = access_units_hevc if t.get("codec") == "hevc" else access_units
+                config, frames = au(open(clip, "rb").read())
             r = run_test(sock, t, config, frames, a.loops)
             if r.get("ok"):  # measured here: the PS4 total also counts earlier tests
                 r["kb_per_frame"] = sum(len(d) for _, d in frames) / len(frames) / 1024

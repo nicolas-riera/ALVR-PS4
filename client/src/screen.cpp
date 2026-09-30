@@ -55,6 +55,7 @@ static bool screen_init_impl(Screen *s, int width, int height)
     rc = sceKernelMapDirectMemory(&mem, total, 0x33, 0, phys, align);
     if (rc < 0) {
         LOG("sceKernelMapDirectMemory failed: 0x%08x", rc);
+        sceKernelReleaseDirectMemory(phys, total);
         return false;
     }
 
@@ -156,6 +157,7 @@ bool screen_register_vr_buffers(Screen *s, int first_index)
     rc = sceKernelMapDirectMemory(&mem, each * 2, 0x33, 0, phys, align);
     if (rc < 0) {
         LOG("vr buffers: map failed 0x%08x", (unsigned)rc);
+        sceKernelReleaseDirectMemory(phys, each * 2);
         return false;
     }
     void *bufs[2] = {mem, (char *)mem + each};

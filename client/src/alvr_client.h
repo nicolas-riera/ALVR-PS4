@@ -57,5 +57,18 @@ void alvr_send_tracking(uint64_t timestamp_ns, const AlvrDeviceMotion *head, con
 void alvr_update_input(int hand, const AlvrHandInput *in);
 // Controller battery for SteamVR (hand 0 left, 1 right; gauge 0..1). Sent when it changes.
 void alvr_set_battery(int hand, bool known, float gauge, bool plugged);
+// Per displayed frame, for the ALVR dashboard's latency and frame rate graphs
+// (ClientStatistics, as the official client sends it from its compositor): the frame is
+// identified by its tracking timestamp; the stages follow each other from its arrival.
+struct AlvrFrameStatistics {
+    uint64_t target_timestamp_ns;       // the frame's tracking timestamp
+    uint64_t frame_interval_ns;         // since the previous new frame's display
+    uint64_t video_decode_ns;           // fully received -> decoded picture
+    uint64_t video_decoder_queue_ns;    // decoded -> taken for display (conversion, reserve)
+    uint64_t rendering_ns;              // taken -> handed to the compositor
+    uint64_t vsync_queue_ns;            // handed to the compositor -> displayed
+    uint64_t total_pipeline_latency_ns; // tracking sample -> displayed
+};
+void alvr_send_statistics(const AlvrFrameStatistics *st);
 // Microphone uplink: s16le mono at 48 kHz, ~10 ms per call (any thread).
 void alvr_send_microphone(const uint8_t *pcm, size_t len);

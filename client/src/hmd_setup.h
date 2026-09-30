@@ -21,3 +21,12 @@ bool hmd_setup_start(int user_id);
 // Call every frame while running. DONE and FAILED are returned once, then IDLE.
 HmdSetupState hmd_setup_poll();
 bool hmd_setup_running();
+
+// System VR service dialog (libSceVrServiceDialog), mode 0 as VR Worlds opens it
+// (reference/decomp/vrservicedialog.c; VR Worlds eboot at 0x14f8bd9): the PS VR "confirm
+// your position" screen, which gets the camera to find the headset.
+bool vr_service_dialog_init(int module);
+bool vr_service_dialog_open();
+bool vr_service_dialog_running();
+// Call every frame; ends the dialog once the system has finished it.
+void vr_service_dialog_poll();

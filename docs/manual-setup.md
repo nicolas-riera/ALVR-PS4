@@ -36,13 +36,14 @@ device properties → Advanced), the only rate the PS4 plays.
 
 | Setting | Value | Why |
 | --- | --- | --- |
-| Video → Preferred codec | **H264** | the PS4 hardware decoder is used for H.264 only |
+| Video → Preferred codec | **H264** | the PS4's decoder handles HEVC too, but more slowly |
 | Video → Foveated encoding | **on**: center region width 0.5, height 0.5, center shift X 0, Y 0, horizontal and vertical edge ratio 2 | keeps the center of each eye at full resolution and squeezes the edges 2:1 (the lenses blur them anyway): at the default 130% resolution the PS4 decodes a 1920×1056 frame instead of 2496×1408, the size its decoder handles quickly. The client reads these values from the streamer, so other values work too; a smaller center or a higher edge ratio decodes faster but blurs more of the view |
 | Video → Preferred FPS | **90** | the client offers only the rate set on the PS4 (90 by default; 60 is reprojected to 120 Hz) |
 | Video → Encoder → Quality preset | **Quality** (NVENC: **P4**) | the fastest preset blurs text; the PC's GPU pays for it, not the PS4 |
 | Video → Bitrate | **Constant, 80 Mbps** | the PS4 Pro decodes 90 fps up to about 130 Mbps (measured with `tools/video_bench.py`), but 100 Mbps was too much in use; 30 Mbps is too low for readable text |
 | Headset → Extra OpenVR props | `TrackingSystemNameString` = `htc`, `ModelNumberString` = `PlayStation VR`, `ManufacturerNameString` = `Sony Interactive Entertainment`, `RenderModelNameString` = `generic_hmd`, `RegisteredDeviceTypeString` = `sony/psvr`, `DriverVersionString` = `20.14.1` | the "Custom" headset mode declares no identity at all; VRChat left the head at the origin |
 | Headset → Controllers → Extra OpenVR props | also `CurrentUniverseIdUint64` = `2` | same tracking universe as the headset |
+| Headset → Position recentering mode, Rotation recentering mode | **Disabled** (both) | the PS4 places the play area centre itself; the streamer recenters on its last head pose, which it keeps across reconnections, so the play area took the direction the headset faced at the previous disconnection |
 | Audio → Game audio | **on** | played in the PSVR headphones |
 | Audio → Microphone | **on**, devices **VAC**, only with a virtual audio cable (see [Microphone](#microphone)) | the PSVR microphone becomes a Windows microphone |
 | Connection → Stream protocol | **UDP** | TCP streaming is not implemented |

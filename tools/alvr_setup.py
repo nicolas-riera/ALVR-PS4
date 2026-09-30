@@ -9,7 +9,8 @@ Applies every setting the PS4 client needs (see docs/manual-setup.md):
   - headset identity (PlayStation VR, same tracking system and universe as the controllers);
   - encoder quality: the "Quality" preset (NVENC P4) at 80 Mbps instead of the fastest
     preset at 30 Mbps, which blurred text (the PC's GPU pays for it, not the PS4);
-  - game audio on; with --mic, the microphone too (needs VB-Audio Virtual Cable on the PC);
+  - game audio on; with --mic, the microphone too (preset "VAC": needs Virtual Audio Cable, "Line 1",
+    on the PC; the one-file setup picks VB-Cable or Virtual Audio Cable by itself);
   - stream over UDP;
   - controllers: Vive wand emulation, hand skeleton off (PS Moves have no fingers),
     position/rotation offsets 0 (the default -11 cm is meant for Quest controllers and
@@ -164,6 +165,11 @@ def main():
         audio["microphone"]["content"]["devices"]["variant"] = "VAC"
     ss["connection"]["stream_protocol"]["variant"] = "Udp"
 
+    # No recentering by the streamer: it recenters on its last head pose, which it keeps
+    # across reconnections (the play area took the headset's direction at the previous
+    # disconnection); the PS4 places the play area centre itself.
+    ss["headset"]["position_recentering_mode"]["variant"] = "Disabled"
+    ss["headset"]["rotation_recentering_mode"]["variant"] = "Disabled"
     controllers = ss["headset"]["controllers"]
     controllers["enabled"] = True
     c = controllers["content"]

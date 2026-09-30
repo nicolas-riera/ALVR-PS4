@@ -63,7 +63,7 @@ static int read_battery(int handle)
     static int reads;
     const bool dump = n > 0 && reads++ % 6 == 0;
     if (dump || (n <= 0 && reads < 3)) {
-        const uint8_t *e = entries[n > 0 ? n - 1 : 0].b;
+        const uint8_t *e = entries[n > 4 ? 3 : n > 0 ? n - 1 : 0].b; // max_entries 4
         char hex[3][2 * 56 + 1];
         for (int line = 0; line < 3; line++)
             for (int i = 0; i < 56; i++)
@@ -192,10 +192,19 @@ void pad_update(PadController *p)
     tracker_update_device(&p->track);
 }
 
+static int g_vibration_percent = 100;
+
+void pad_set_vibration_strength(int percent)
+{
+    g_vibration_percent = percent < 0 ? 0 : percent > 100 ? 100 : percent;
+}
+
 void pad_vibrate(PadController *p, uint8_t large, uint8_t small, uint32_t duration_ms)
 {
     if (p->handle < 0)
         return;
+    large = (uint8_t)(large * g_vibration_percent / 100); // strength setting (0 = off)
+    small = (uint8_t)(small * g_vibration_percent / 100);
     p->vibration_end_us = duration_ms ? sceKernelGetProcessTime() + duration_ms * 1000ull : 0;
     if (large == p->vib_large && small == p->vib_small)
         return;

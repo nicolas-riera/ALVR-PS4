@@ -16,6 +16,7 @@
 
 static const char *SAVE_DIR_NAME = "settings";
 static const char *SAVE_FILE = "settings.txt";
+static const char *SAVE_TMP_FILE = "settings.tmp"; // written first, then renamed over SAVE_FILE
 static const uint64_t SAVE_BLOCKS = 96; // the minimum (96 x 32 KiB)
 
 static int g_user = -1;
@@ -28,8 +29,10 @@ static pthread_cond_t g_save_cond = PTHREAD_COND_INITIALIZER;
 static ClientConfig g_pending;
 static bool g_has_pending, g_saver_started;
 
-// Mounts the save (created on first use). Returns false with the error logged.
-static bool mount(bool write, OrbisSaveDataMountPoint *mp)
+static const unsigned SAVE_NOT_FOUND = 0x809f0008; // read-only mount of a save never written
+
+// Mounts the save (created on first use). Returns 0, or the error (logged).
+static int mount(bool write, OrbisSaveDataMountPoint *mp)
 {
     OrbisSaveDataDirName dir;
     memset(&dir, 0, sizeof(dir));
@@ -46,14 +49,13 @@ static bool mount(bool write, OrbisSaveDataMountPoint *mp)
     memset(result, 0, sizeof(result));
     int rc = sceSaveDataMount2(&m, (OrbisSaveDataMountResult *)result);
     if (rc < 0) {
-        // 0x809f0008: no save yet (read-only mount of a save never written).
-        if (write || (unsigned)rc != 0x809f0008)
+        if (write || (unsigned)rc != SAVE_NOT_FOUND)
             LOG("config: save data mount (%s, user 0x%x) -> 0x%08x", write ? "write" : "read", g_user, (unsigned)rc);
-        return false;
+        return rc;
     }
     memset(mp, 0, sizeof(*mp));
     memcpy(mp->data, result, sizeof(mp->data) - 1); // mount point name, first in the result
-    return true;
+    return 0;
 }
 
 static void unmount(OrbisSaveDataMountPoint *mp)
@@ -66,11 +68,15 @@ static void unmount(OrbisSaveDataMountPoint *mp)
 static void write_save(const ClientConfig *cfg)
 {
     OrbisSaveDataMountPoint mp;
-    if (!mount(true, &mp))
+    if (mount(true, &mp) != 0)
         return;
-    char path[64];
-    snprintf(path, sizeof(path), "/%s/%s", mp.data[0] == '/' ? mp.data + 1 : mp.data, SAVE_FILE);
-    FILE *f = fopen(path, "w");
+    // Written to a temporary file renamed over the settings once complete: the system may
+    // close the app at any time, and a half-written file would lose every setting.
+    const char *dir = mp.data[0] == '/' ? mp.data + 1 : mp.data;
+    char path[64], tmp[64];
+    snprintf(path, sizeof(path), "/%s/%s", dir, SAVE_FILE);
+    snprintf(tmp, sizeof(tmp), "/%s/%s", dir, SAVE_TMP_FILE);
+    FILE *f = fopen(tmp, "w");
     if (f) {
         fprintf(f, "hostname=%s\n", cfg->hostname);
         fprintf(f, "resolution_percent=%d\n", cfg->resolution_percent);
@@ -80,9 +86,15 @@ static void write_save(const ClientConfig *cfg)
         fprintf(f, "user_height_cm=%d\n", cfg->user_height_cm);
         fprintf(f, "center_on_steamvr_start=%d\n", cfg->center_on_connect);
         fprintf(f, "refresh_rate_hz=%d\n", cfg->refresh_rate);
-        fclose(f);
+        fprintf(f, "vibration_percent=%d\n", cfg->vibration_percent);
+        fprintf(f, "hud=%d\n", cfg->hud);
+        const bool written = !ferror(f);
+        if (fclose(f) != 0 || !written)
+            LOG("config: cannot write %s", tmp);
+        else if (rename(tmp, path) != 0)
+            LOG("config: cannot rename %s to %s", tmp, path);
     } else {
-        LOG("config: cannot write %s", path);
+        LOG("config: cannot write %s", tmp);
     }
     // What the system's saved data list shows.
     char detail[128];
@@ -109,11 +121,14 @@ static void *saver_thread(void *)
     return nullptr;
 }
 
-static void read_save(ClientConfig *cfg)
+// Returns 0 (read, or no settings file in the save), SAVE_NOT_FOUND (no save yet) or the
+// mount error.
+static int read_save(ClientConfig *cfg)
 {
     OrbisSaveDataMountPoint mp;
-    if (!mount(false, &mp))
-        return;
+    const int rc = mount(false, &mp);
+    if (rc != 0)
+        return rc;
     char path[64];
     snprintf(path, sizeof(path), "/%s/%s", mp.data[0] == '/' ? mp.data + 1 : mp.data, SAVE_FILE);
     FILE *f = fopen(path, "r");
@@ -136,10 +151,15 @@ static void read_save(ClientConfig *cfg)
                 continue;
             if (sscanf(line, "refresh_rate_hz=%d", &cfg->refresh_rate) == 1)
                 continue;
+            if (sscanf(line, "vibration_percent=%d", &cfg->vibration_percent) == 1)
+                continue;
+            if (sscanf(line, "hud=%d", &cfg->hud) == 1)
+                continue;
         }
         fclose(f);
     }
     unmount(&mp);
+    return 0;
 }
 
 void config_load(ClientConfig *cfg, int user_id)
@@ -150,14 +170,30 @@ void config_load(ClientConfig *cfg, int user_id)
     cfg->head_prediction_percent = CONFIG_DEFAULT_HEAD_PREDICTION;
     cfg->center_on_connect = 1;
     cfg->refresh_rate = 90;
+    cfg->vibration_percent = 100;
+    cfg->hud = 0;
 
     g_user = user_id;
     int rc = sceSaveDataInitialize3(0);
     g_save_ok = rc >= 0;
-    if (!g_save_ok)
+    if (!g_save_ok) {
         LOG("config: sceSaveDataInitialize3 -> 0x%08x, settings will not be kept", (unsigned)rc);
-    else
-        read_save(cfg);
+    } else {
+        // A save that exists but cannot be read now is not overwritten with defaults (a new
+        // hostname would make the PC distrust the PS4): tried 3 times, then this run keeps
+        // its settings in memory only.
+        for (int attempt = 0; attempt < 3; attempt++) {
+            rc = read_save(cfg);
+            if (rc == 0 || (unsigned)rc == SAVE_NOT_FOUND)
+                break;
+            sceKernelUsleep(200000);
+        }
+        if (rc != 0 && (unsigned)rc != SAVE_NOT_FOUND) {
+            LOG("config: the settings save cannot be read (0x%08x): defaults for this run, nothing saved",
+                (unsigned)rc);
+            g_save_ok = false;
+        }
+    }
 
     if (cfg->resolution_percent < 50 || cfg->resolution_percent > 160)
         cfg->resolution_percent = 130;
@@ -172,11 +208,15 @@ void config_load(ClientConfig *cfg, int user_id)
     cfg->center_on_connect = cfg->center_on_connect != 0;
     if (cfg->refresh_rate != 60 && cfg->refresh_rate != 90)
         cfg->refresh_rate = 90;
+    if (cfg->vibration_percent < 0 || cfg->vibration_percent > 100)
+        cfg->vibration_percent = 100;
+    cfg->hud = cfg->hud != 0;
     if (cfg->hostname[0]) {
         LOG("config: hostname %s, resolution %d%%, %d Hz, headset prediction %d%%, extra controller prediction %d ms, "
-            "camera height %d cm, user height %d cm (save data of user 0x%x)", cfg->hostname, cfg->resolution_percent,
-            cfg->refresh_rate, cfg->head_prediction_percent, cfg->controller_prediction_ms, cfg->camera_height_cm,
-            cfg->user_height_cm, user_id);
+            "camera height %d cm, user height %d cm, vibration %d%%, overlay %d (save data of user 0x%x)",
+            cfg->hostname, cfg->resolution_percent, cfg->refresh_rate, cfg->head_prediction_percent,
+            cfg->controller_prediction_ms, cfg->camera_height_cm, cfg->user_height_cm, cfg->vibration_percent, cfg->hud,
+            user_id);
         return;
     }
     // Same format as ALVR 20.14.1 (alvr/client_core/src/storage.rs): 4 random digits.

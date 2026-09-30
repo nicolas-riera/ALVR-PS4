@@ -56,5 +56,7 @@ void pad_update(PadController *pad);
 // Motors: large (left grip, low rumble) and small (right grip, fast buzz), 0..255. With
 // duration_ms > 0 both stop after it; 0 keeps them until the next call.
 void pad_vibrate(PadController *pad, uint8_t large, uint8_t small, uint32_t duration_ms);
+// Vibration strength setting, 0-100 % (0 = off), for every later pad_vibrate.
+void pad_set_vibration_strength(int percent);
 // Battery gauge 0..1 and charging state; false when unknown.
 bool pad_battery(const PadController &pad, float *gauge, bool *charging);

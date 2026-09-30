@@ -13,9 +13,10 @@ SteamVR's icon conventions, taken from its own drivers (drivers/htc/resources/ic
   of the icon by a transparent ring, with the symbol cut out of the badge;
 - headsets 50x32, controllers and trackers 32x32, plus @2x versions at twice the size.
 
-PSVR: the shape of tools/icons/psvr_shape.png (a 32x32 PSVR side view), smoothed at high
-resolution. PS Move: drawn here, at the angle of SteamVR's Vive wand icon (-46 degrees),
-after the PS Move icon of PSMoveSteamVRBridge (Apache-2.0, github.com/HipsterSloth).
+PSVR: the icon drawn by leonmc330 (github.com/leonmc330), tools/icons/psvr_leonmc330.png
+(512x512): its shape, in SteamVR's green and grey, with the error badge in its red. PS Move:
+drawn here, at the angle of SteamVR's Vive wand icon (-46 degrees), after the PS Move icon of
+PSMoveSteamVRBridge (Apache-2.0, github.com/HipsterSloth).
 
 Usage: python tools/icons/make_icons.py
 """
@@ -30,7 +31,7 @@ SS = 16  # supersampling: shapes are built at 16x the 32 px design grid
 
 GREEN = (133, 183, 23)
 GREY = (78, 77, 82)
-BADGE = {"alert": GREEN, "low": (238, 64, 38), "error": (235, 4, 124)}
+BADGE = {"alert": GREEN, "low": (238, 64, 38), "error": (255, 0, 0)}  # error: the red of leonmc330's icons
 
 
 def blank(w, h):
@@ -53,24 +54,13 @@ def dilate(mask, px):
 # --- shapes (design grid units: 1 = one pixel of the 32 px icon) --------------------------
 
 def psvr_shape(w, h):
-    """The source is line art: the visor outline is filled to a solid silhouette (SteamVR's
-    style), keeping the lens as a hole."""
-    src = Image.open(os.path.join(ROOT, "tools", "icons", "psvr_shape.png")).convert("RGBA").getchannel("A")
-    big = src.resize((32 * SS, 32 * SS), Image.LANCZOS)
-    big = smooth(big, 0.7)
-    # fill everything the outside cannot reach (the visor interior, the lens included)
-    # (on a canvas with a margin: the shape touches the source's edges)
-    pad = 2 * SS
-    outside = Image.new("L", (big.width + 2 * pad, big.height + 2 * pad), 128)
-    outside.paste(big.point(lambda v: 0 if v else 128), (pad, pad))
-    ImageDraw.floodfill(outside, (0, 0), 255)
-    solid = outside.crop((pad, pad, pad + big.width, pad + big.height)).point(lambda v: 0 if v == 255 else 255)
-    # the lens: the small blob inside the visor in the source (around pixel 6.5, 19.5)
-    lens = blank(32, 32)
-    ImageDraw.Draw(lens).ellipse((4.9 * SS, 18.0 * SS, 8.3 * SS, 20.9 * SS), fill=255)
-    big = smooth(ImageChops.subtract(solid, lens), 0.3)
+    """leonmc330's PSVR (its alpha), fitted into the icon with a 1 px margin, centred."""
+    src = Image.open(os.path.join(ROOT, "tools", "icons", "psvr_leonmc330.png")).convert("RGBA").getchannel("A")
+    src = src.crop(src.getbbox())
+    scale = min((w - 2) * SS / src.width, (h - 2) * SS / src.height)
+    big = src.resize((round(src.width * scale), round(src.height * scale)), Image.LANCZOS)
     m = blank(w, h)
-    m.paste(big, (((w - 32) // 2) * SS, ((h - 32) // 2) * SS))
+    m.paste(big, ((w * SS - big.width) // 2, (h * SS - big.height) // 2))
     return m
 
 

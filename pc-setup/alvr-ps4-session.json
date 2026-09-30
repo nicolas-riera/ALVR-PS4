@@ -420,10 +420,10 @@
         "Local": {
           "view_height": 1.5
         },
-        "variant": "LocalFloor"
+        "variant": "Disabled"
       },
       "rotation_recentering_mode": {
-        "variant": "Yaw"
+        "variant": "Disabled"
       },
       "controllers": {
         "enabled": true,

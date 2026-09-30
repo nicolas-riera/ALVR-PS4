@@ -18,11 +18,12 @@ Releases page) and accept the administrator prompt. It:
 4. installs [VB-Audio Virtual Cable](https://vb-audio.com/Cable/) for the microphone,
    unless Virtual Audio Cable or VB-Cable is already installed;
 5. writes the PS4 settings (see [the settings table](manual-setup.md#by-hand-in-the-dashboard-settings-tab))
-   into ALVR's `session.json`, after backing up any existing one;
+   into ALVR's `session.json`, after backing up any existing one (a PS4 already trusted
+   stays trusted);
 6. opens the ALVR ports (9943-9944, UDP and TCP) in the Windows firewall;
 7. registers the driver with SteamVR (and unregisters any other ALVR version, which would
    fight over the headset), creates an "ALVR (PS4)" desktop shortcut and starts the
-   dashboard.
+   dashboard (as your user, not as administrator).
 
 It is safe to run again. To install into another folder, run it from a command prompt:
 `ALVR-PS4-Setup.bat D:\VR`. To start over from scratch, run

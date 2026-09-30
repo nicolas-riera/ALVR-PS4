@@ -31,6 +31,11 @@ struct ClientConfig {
     // Headset refresh rate, 90 or 60 (next launch). 90: the PSVR runs at 90 Hz and the PC
     // streams 90 frames per second; 60: the PSVR runs at 120 Hz, each frame shown twice.
     int refresh_rate;
+    // PS Move (and DualShock 4) vibration strength, 0-100 % of the full strength (0 = off),
+    // for the game's haptics and the lobby's alike.
+    int vibration_percent;
+    // Performance overlay in the headset while streaming (1) or not (0).
+    int hud;
 };
 
 // Reads the settings from the save data (defaults when there is none yet).

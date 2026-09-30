@@ -15,7 +15,7 @@ lens distortion, reprojection), and closing it from the PS4 menu puts the consol
 normal mode.
 
 > Status: headset tracking, the PS Move controllers (emulated as HTC Vive wands, with
-> vibration), the lobby, video (hardware H.264 decoding with foveated encoding, 90 Hz by
+> vibration), the lobby, video (H.264 with foveated encoding, 90 Hz by
 > default, or 60 Hz shown by the system at 120 Hz through reprojection), game audio and the
 > microphone work.
 > Mainly tested with VRChat and Beat Saber on a PS4 Pro.
@@ -90,5 +90,6 @@ The controls and the lobby settings are described in [Usage](docs/usage.md).
 
 ## Credits
 
+The PSVR status icons in SteamVR are drawn by [leonmc330](https://github.com/leonmc330/).
 The PS Move status icon is drawn after the one of
 [PSMoveSteamVRBridge](https://github.com/HipsterSloth/PSMoveSteamVRBridge) (Apache License 2.0).

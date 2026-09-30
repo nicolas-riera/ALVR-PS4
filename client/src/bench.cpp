@@ -31,6 +31,7 @@ struct Header {
     double fps; // 0: as fast as the pipeline takes frames (queue kept at 2)
     int loops;
     int depth, jobs;
+    int codec; // 0 H.264, 1 HEVC
 };
 
 static const size_t CLIP_MAX = 160u << 20;
@@ -109,8 +110,9 @@ static bool parse_header(const char *json, Header *h)
     h->full_range = json_num(json, "full_range", 1) != 0;
     h->fps = json_num(json, "fps", 90);
     h->loops = (int)json_num(json, "loops", 1);
-    h->depth = (int)json_num(json, "depth", 2);
-    h->jobs = (int)json_num(json, "jobs", 6);
+    h->depth = (int)json_num(json, "depth", 3);
+    h->jobs = (int)json_num(json, "jobs", 4);
+    h->codec = (int)json_num(json, "codec", 0);
     FoveationSettings &f = h->ffe_settings;
     f.center_size_x = (float)json_num(json, "ffe_center_x", 0);
     f.center_size_y = (float)json_num(json, "ffe_center_y", 0);
@@ -141,11 +143,13 @@ static void run_clip(const Header &h, const uint8_t *config, uint32_t config_len
     }
     LOG("bench: %s: %d frames x %d, %ux%u per eye%s, %.0f fps, depth %d, %d jobs", h.name, frames, h.loops, h.view_w,
         h.view_h, h.ffe ? " (foveated)" : "", h.fps, h.depth, h.jobs);
-    VideoBenchOptions opt{(uint32_t)h.depth, h.jobs};
+    VideoBenchOptions opt{};
+    opt.decode_depth = (uint32_t)h.depth;
+    opt.convert_jobs = h.jobs;
     video_bench_set_options(&opt);
     video_reset();
     video_set_stream(h.view_w, h.view_h, h.full_range, h.ffe ? &h.ffe_settings : nullptr);
-    video_set_decoder_config(0, config, config_len);
+    video_set_decoder_config(h.codec == 1 ? 1 : 0, config, config_len);
     g_active = true;
     sceKernelUsleep(100000); // decoder recreation happens on the first frame
     video_bench_begin();

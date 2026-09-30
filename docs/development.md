@@ -34,6 +34,15 @@ python tools/log_receiver.py               # prints the PS4 logs and saves them 
 
 The stable build sends no logs.
 
+While streaming, a `video:` line every 5 seconds sums up the stream: frames received,
+decoded and dropped, decode and conversion times, latency (`m2p`), and the frame pacing:
+`repeat` (display frames with no new frame), `skip` (frames never shown), `late` (frames
+that came after the decision point they were due at), `margin` (the jitter margin frames
+wait for), `decode` (received to decoder picture), `wait` (picture to submission), `lead`
+(how long before a compositor pass the frame is submitted) and `misses` (submissions that
+came after the pass), and
+`arrival` (gaps in the frames received from the PC, frames bunched together, longest gap).
+
 ## Release
 
 ```
@@ -58,13 +67,13 @@ timings. `--list` shows the test plans; the script's header describes every opti
 | --- | --- |
 | `client/src/main.cpp` | startup, main loop (90 or 60 Hz), lobby/video display, frame pacing, tracking uplink |
 | `client/src/alvr_client.*` | ALVR 20.14.1 protocol: discovery, handshake, streams, video reassembly |
-| `client/src/video.*` | hardware H.264 decoding (libSceVideodec2), NV12 → RGB |
+| `client/src/video.*` | H.264 decoding (libSceVideodec2, the system decoder: CPU + GPU compute), paced display, NV12 → RGB |
 | `client/src/foveation.*` | foveated encoding math (expansion of the squeezed eye edges), same as the official client |
 | `client/src/audio.*` | game audio playback (libSceAudioOut) and microphone capture (libSceAudioIn) |
 | `client/src/hmd.*`, `reproj.*`, `screen.*` | PSVR (libSceHmd) and the system reprojection |
 | `client/src/tracker.*`, `camera.*`, `move.*`, `wand.*`, `pad.*`, `hid.*` | camera tracking (libSceVrTracker), PS Move, Vive wand emulation, DualShock 4, raw HID reports |
 | `client/src/config.*` | settings stored in the PS4 save data (libSceSaveData) |
-| `client/src/settings.*` | lobby settings panel and first launch height panel |
+| `client/src/settings.*` | lobby settings panel, first launch height panel and height calibration |
 | `client/src/lobby.*` | software-rendered lobby |
 | `client/src/bench.*` | video bench server (Dev build) |
 | `docs/alvr-20.14.1-protocol.md` | the ALVR 20.14.1 wire protocol, as implemented |
@@ -93,6 +102,8 @@ the stable app's save. It holds these values:
 | `head_prediction` | `40` | "Headset prediction": share of the stream latency over which the headset position sent to SteamVR is predicted, 0–100 (0 = current position) |
 | `controller_prediction_ms` | `0` | extra controller prediction on top of SteamVR's, 0–60 |
 | `user_height_cm` | `0` (not set) | your height, set in the lobby (first launch wizard, then settings); `0` shows the wizard at the next launch (a settings Reset also shows it at once) |
-| `camera_height_cm` | `0` (estimated) | height of the PS Camera above the floor, derived from your height |
+| `camera_height_cm` | `0` (estimated) | height of the PS Camera above the floor: derived from your height, or measured by the height calibration |
 | `center_on_steamvr_start` | `1` | `1`: the play area centre is placed on the headset each time SteamVR connects; `0`: only once, at the first tracking |
 | `refresh_rate_hz` | `90` | `90`: PSVR at 90 Hz, 90 fps stream; `60`: PSVR at 120 Hz, 60 fps stream (each frame shown twice) |
+| `vibration_percent` | `100` | PS Move and DualShock 4 vibration strength, 0-100 (0 = off), in steps of 10 |
+| `hud` | `0` | `1`: performance overlay in the headset while playing |

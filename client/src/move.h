@@ -32,6 +32,7 @@ struct MoveController {
     uint64_t next_register_us; // tracker registration retry time
     uint8_t vibration;         // current motor intensity
     uint64_t vibration_end_us; // 0 = no timed pulse
+    uint64_t vibration_sent_us; // last time the motor intensity was sent (resent every second)
     // Battery byte of the raw PS Move report: 0..5 (5 = full), 0xEE charging, 0xEF charged
     // (on USB), -1 unknown. Read every 5 s (libSceMove itself discards it).
     int battery_raw;
@@ -47,7 +48,13 @@ bool move_battery(const MoveController &ctl, float *gauge, bool *charging);
 void move_start(int move_module, int user_id, MoveController out[MOVE_MAX]);
 // Reads buttons and tracking; (un)registers controllers as they (dis)connect.
 void move_update(MoveController ctl[MOVE_MAX]);
-// Rumble: intensity 0..255, for duration_ms (0 = until changed).
+// Rumble: intensity 0..255, for duration_ms (0 = until changed). Scaled by the strength
+// setting.
+// Thread-safe (game haptics come from the network thread).
 void move_vibrate(MoveController *ctl, uint8_t intensity, uint32_t duration_ms);
+// Stops a timed pulse that has run out (move_update calls it).
+void move_vibration_expire(MoveController *ctl);
+// Vibration strength setting, 0-100 % (0 = off), for every later move_vibrate.
+void move_set_vibration_strength(int percent);
 // RGB of a tracker LED colour index.
 uint32_t move_led_rgb(uint32_t led_color);

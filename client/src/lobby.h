@@ -24,7 +24,15 @@ struct LobbyPanelItem {
     uint32_t text_rgb;
 };
 
-#define LOBBY_PANEL_MAX_ITEMS 48
+// Line drawing on a panel (pictograms), drawn over the items: a segment from (x0, y0) to
+// (x1, y1), or a circle of radius r centred on (x0, y0) when r > 0.
+struct LobbyPanelShape {
+    float x0, y0, x1, y1, r;
+    uint32_t rgb;
+};
+
+#define LOBBY_PANEL_MAX_ITEMS 72
+#define LOBBY_PANEL_MAX_SHAPES 64
 
 struct LobbyPanel {
     bool visible;
@@ -32,6 +40,8 @@ struct LobbyPanel {
     Vec3 right, up;  // unit axes
     int count;
     LobbyPanelItem items[LOBBY_PANEL_MAX_ITEMS];
+    int shape_count;
+    LobbyPanelShape shapes[LOBBY_PANEL_MAX_SHAPES];
 };
 
 // Settings lasers: the two PS Moves and the DualShock 4 of the user playing.
@@ -52,6 +62,7 @@ struct LobbyView {
     Quat eye_rot[2];
     EyeFov fov[2];  // left, right
     float floor_y;  // tracker-space height of the floor
+    bool grid_visible; // floor grid shown (not while the floor is only a guess)
     float center_x, center_z; // play space centre: the grid is aligned on it
     struct Controller {
         bool visible;
@@ -92,8 +103,14 @@ struct LobbyView {
     float info_yaw;         // panel facing (radians around +Y; 0 faces +Z)
     LobbyPanel *panel;      // settings panel, or nullptr
     LobbyPointer pointers[LOBBY_POINTERS];
-    // Fade to black: 1 = scene fully visible, 0 = black.
+    // Fade of the surroundings (grid, info panel, settings): 1 = fully visible, 0 = black.
+    // The PS Camera and the controllers stay visible.
     float brightness;
+    // Only the PS Camera, drawn at beacon_pos in beacon_rgb (headset tracking not started:
+    // the rest is hidden, the camera shows where to look).
+    bool beacon;
+    Vec3 beacon_pos;
+    uint32_t beacon_rgb;
     // Text attached to the view (shown over the black), with its own brightness.
     const char *overlay_text;
     float overlay_brightness;

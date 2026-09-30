@@ -38,15 +38,26 @@ $TrackerBatName = "ALVR-PS4-Tracker-Mode.bat"
 $TrackerSystemName = "PSMoves"   # tracking system of every ALVR device in tracker mode
 $CableBatName = "ALVR-PS4-Audio-Cable-Toggle.bat"
 
-# Reset mode: the .bat runs from inside an installed streamer folder. Under the tracker
-# mode or audio cable names, it switches the mode or toggles the cable instead.
+# Reset mode: the .bat runs from inside an installed streamer folder under the reset name.
+# Under the tracker mode or audio cable names, it switches the mode or toggles the cable
+# instead. Any other name there (a renamed copy, the setup dropped into the folder) stops:
+# the reset deletes the whole folder, so it only runs under its own name.
 $BatDir = Split-Path -Parent $env:ALVR_PS4_BAT
-$ResetMode = Test-Path (Join-Path $BatDir "ALVR Dashboard.exe")
+$InStreamer = Test-Path (Join-Path $BatDir "ALVR Dashboard.exe")
 $BatName = Split-Path -Leaf $env:ALVR_PS4_BAT
-$SwitchMode = $ResetMode -and ($BatName -ieq $TrackerBatName)
-$CableMode = $ResetMode -and ($BatName -ieq $CableBatName)
-if ($SwitchMode -or $CableMode) { $ResetMode = $false }
+$ResetMode = $InStreamer -and ($BatName -ieq $ResetBatName)
+$SwitchMode = $InStreamer -and ($BatName -ieq $TrackerBatName)
+$CableMode = $InStreamer -and ($BatName -ieq $CableBatName)
+if ($InStreamer -and -not ($ResetMode -or $SwitchMode -or $CableMode)) {
+    Write-Host "This file is inside an ALVR streamer folder ($BatDir) under an unknown name." -ForegroundColor Red
+    Write-Host "Run ALVR-PS4-Setup.bat from another folder, or use $ResetBatName, $TrackerBatName"
+    Write-Host "or $CableBatName in this folder."
+    Read-Host "Press Enter to close"
+    exit
+}
+# A relative install folder is resolved now: once elevated, the current folder is System32.
 $InstallDir = $env:ALVR_PS4_DIR
+if ($InstallDir) { $InstallDir = [IO.Path]::GetFullPath($InstallDir) }
 # Default: the folder holding the .bat (not the current directory, which is System32 once
 # elevated); in reset mode, the folder holding the streamer folder.
 if ($ResetMode) { $InstallDir = Split-Path -Parent $BatDir }
@@ -61,12 +72,23 @@ $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
     [Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $admin) {
     Write-Host "Asking for administrator rights..."
-    if ($env:ALVR_PS4_DIR) {
-        Start-Process -FilePath $env:ALVR_PS4_BAT -ArgumentList @("`"$env:ALVR_PS4_DIR`"") -Verb RunAs
-    } else {
-        Start-Process -FilePath $env:ALVR_PS4_BAT -Verb RunAs
+    try {
+        if ($env:ALVR_PS4_DIR) {
+            Start-Process -FilePath $env:ALVR_PS4_BAT -ArgumentList @("`"$InstallDir`"") -Verb RunAs
+        } else {
+            Start-Process -FilePath $env:ALVR_PS4_BAT -Verb RunAs
+        }
+    } catch {
+        Write-Host "Administrator rights were not given: nothing was changed." -ForegroundColor Red
+        Read-Host "Press Enter to close"
     }
     exit
+}
+
+# The ALVR dashboard is started as the signed-in user, not elevated like this script:
+# SteamVR, which the dashboard launches, must not run as administrator.
+function Start-Dashboard($dir) {
+    Start-Process -FilePath "explorer.exe" -ArgumentList "`"$(Join-Path $dir 'ALVR Dashboard.exe')`""
 }
 
 # Driver folders registered with SteamVR (openvrpaths.vrpath, written by vrpathreg).
@@ -257,7 +279,7 @@ function Switch-TrackerMode {
 
     Write-Host ""
     Write-Host "Done. Run this file again to switch back." -ForegroundColor Green
-    Start-Process -FilePath (Join-Path $BatDir "ALVR Dashboard.exe") -WorkingDirectory $BatDir
+    Start-Dashboard $BatDir
     Read-Host "Press Enter to close"
 }
 
@@ -267,6 +289,9 @@ function Switch-TrackerMode {
 # holds the disabled ones, and switched like the Sound control panel's Disable / Enable
 # (IPolicyConfig::SetEndpointVisibility; registry DeviceState 0x10000001 = disabled). A PnP
 # disable of the endpoint or of the driver device does not work: it did nothing, or failed.
+# An endpoint marked disabled whose driver is no longer loaded (DeviceState 0x10000004, seen
+# with Virtual Audio Cable turned off by other means) still counts as a cable turned off:
+# the setup must not install another cable over it.
 $CableDescs = @("VB-Audio Virtual Cable", "Virtual Audio Cable")
 $MMDevices = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio"
 
@@ -275,7 +300,10 @@ function Get-AudioCables {
     foreach ($flow in @(@("Render", "0"), @("Capture", "1"))) {
         foreach ($k in @(Get-ChildItem (Join-Path $MMDevices $flow[0]) -ErrorAction SilentlyContinue)) {
             $state = [int64](Get-ItemProperty $k.PSPath -ErrorAction SilentlyContinue).DeviceState
-            if (($state -band 0xF) -ne 1) { continue }   # present endpoints only (4: not present, 8: unplugged)
+            $disabled = ($state -band 0x10000000) -ne 0
+            $present = ($state -band 0xF) -eq 1
+            # Present endpoints (4: not present, 8: unplugged), and absent ones marked disabled.
+            if (-not $present -and -not ($disabled -and ($state -band 0xF) -eq 4)) { continue }
             $props = Get-ItemProperty (Join-Path $k.PSPath "Properties") -ErrorAction SilentlyContinue
             $desc = $props.'{b3f8fa53-0004-438e-9003-51a46e139bfc},6'
             if ($CableDescs -notcontains $desc) { continue }
@@ -283,7 +311,8 @@ function Get-AudioCables {
                 Id = "{0.0.$($flow[1]).00000000}.$($k.PSChildName)"
                 Name = "$($props.'{a45c254e-df1c-4efd-8020-67d146a850e0},2') ($desc, $(if ($flow[1] -eq '0') { 'speaker' } else { 'microphone' }))"
                 Preset = if ($desc -like "VB-Audio*") { "VBCable" } else { "VAC" }
-                Enabled = -not ($state -band 0x10000000)
+                Enabled = $present -and -not $disabled
+                Present = $present
             }
         }
     }
@@ -371,9 +400,15 @@ function Switch-AudioCable {
 
     Step "Virtual audio cable"
     $ok = $true
-    foreach ($c in @($cables | Where-Object { $_.Enabled -ne $on })) { $ok = (Set-CableEndpoint $c $on) -and $ok }
+    $absent = @($cables | Where-Object { -not $_.Present })
+    if ($on -and $absent.Count -gt 0) {
+        foreach ($c in $absent) { Warn "Not present (its driver is not loaded): $($c.Name)" }
+        Warn "Enable the cable's driver in Device Manager (or reinstall it), then run this again."
+        $ok = $false
+    }
+    foreach ($c in @($cables | Where-Object { $_.Present -and $_.Enabled -ne $on })) { $ok = (Set-CableEndpoint $c $on) -and $ok }
     Start-Sleep -Milliseconds 500
-    $left = @(Get-AudioCables | Where-Object { $_.Enabled -ne $on })
+    $left = @(Get-AudioCables | Where-Object { $_.Present -and $_.Enabled -ne $on })
     foreach ($c in $left) { Warn "Still $(if ($on) { 'disabled' } else { 'enabled' }): $($c.Name)" }
     if (-not $ok -or $left.Count -gt 0) {
         Warn "Some devices could not be changed: ALVR's microphone is left as it was."
@@ -444,7 +479,11 @@ try {
         Get-ChildItem -Force $Streamer | Where-Object { $_.Name -ne $ResetBatName } | Remove-Item -Recurse -Force
         Info "Deleted the previous install"
     }
-    if (Test-Path (Join-Path $Streamer "ALVR Dashboard.exe")) {
+    # Installed means the dashboard and the driver are there (an interrupted extraction
+    # is extracted again).
+    if ((Test-Path (Join-Path $Streamer "ALVR Dashboard.exe")) -and
+        (Test-Path (Join-Path $Streamer "bin\win64\driver_alvr_server.dll")) -and
+        (Test-Path (Join-Path $Streamer "driver.vrdrivermanifest"))) {
         Info "Already installed in $Streamer"
     } else {
         New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
@@ -541,6 +580,9 @@ try {
         $micPreset = $cables[0].Preset
         $micOn = $false
         Info "Virtual audio cable found, disabled: ALVR's microphone stays off (turn both on with $CableBatName)"
+        if (-not ($cables | Where-Object { $_.Present })) {
+            Warn "Its driver is not loaded either: enable it again in Device Manager (or reinstall it) to use the PSVR microphone"
+        }
     } elseif ($endpoints | Where-Object { $_.FriendlyName -like "*Line 1*" }) {
         $micPreset = "VAC"
         Info "Virtual Audio Cable found (Line 1)"
@@ -571,13 +613,24 @@ try {
     }
     $json = [Text.Encoding]::UTF8.GetString((Expand-Gz $TemplateGz))
     $json = $json.Replace('"variant": "VAC"', '"variant": "' + $micPreset + '"')
-    if (-not $micOn) {
+    # The PCs' trust of the PS4 (client_connections) is kept when the setup runs again;
+    # only the reset starts from an empty session.
+    $trusted = $null
+    if (Test-Path $Session) {
+        try { $trusted = ([IO.File]::ReadAllText($Session) | ConvertFrom-Json).client_connections } catch { $trusted = $null }
+        if ($trusted -and @($trusted.PSObject.Properties).Count -eq 0) { $trusted = $null }
+    }
+    if (-not $micOn -or $trusted) {
         $s = $json | ConvertFrom-Json
-        Set-Microphone $s $false $null
+        if (-not $micOn) { Set-Microphone $s $false $null }
+        if ($trusted) {
+            $s.client_connections = $trusted
+            Info "Kept the trusted PS4 of the previous settings"
+        }
         $json = $s | ConvertTo-Json -Depth 100
     }
     [IO.File]::WriteAllText($Session, $json, (New-Object Text.UTF8Encoding $false))
-    Info "Applied (H.264, 60 fps, foveated encoding, Vive wands, PS Move buttons, game audio, microphone: $(if ($micOn) { $micPreset } else { 'off' }))"
+    Info "Applied (H.264, 90 fps, foveated encoding, Vive wands, PS Move buttons, game audio, microphone: $(if ($micOn) { $micPreset } else { 'off' }))"
 
     # --- Firewall --------------------------------------------------------------------
     Step "Firewall (ALVR ports 9943-9944)"
@@ -585,6 +638,7 @@ try {
         $rule = "ALVR PS4 ($proto 9943-9944)"
         & netsh advfirewall firewall delete rule name="$rule" | Out-Null
         & netsh advfirewall firewall add rule name="$rule" dir=in action=allow protocol=$proto localport=9943-9944 | Out-Null
+        if ($LASTEXITCODE -ne 0) { Warn "Could not add the firewall rule $rule (netsh exit code $LASTEXITCODE)"; continue }
         Info "Rule added: $rule"
     }
 
@@ -601,7 +655,8 @@ try {
             }
         }
         & $vrpathreg adddriver $Streamer | Out-Null
-        Info "Registered $Streamer"
+        if ($LASTEXITCODE -eq 0) { Info "Registered $Streamer" }
+        else { Warn "vrpathreg could not register $Streamer (exit code $LASTEXITCODE): SteamVR will not load the driver" }
     } else {
         Warn "SteamVR not found: install SteamVR from Steam, then run this setup again."
     }
@@ -633,7 +688,7 @@ try {
     Write-Host "  3. In Windows sound settings, pick the cable's output as the microphone"
     Write-Host "     ('Line 1' or 'CABLE Output'), and keep your real speakers/headset as the output."
     Write-Host ""
-    Start-Process -FilePath $Dashboard -WorkingDirectory $Streamer
+    Start-Dashboard $Streamer
     Read-Host "Press Enter to close"
 } catch {
     Write-Host ""

@@ -12,8 +12,11 @@ static Quat mul(Quat a, Quat b)
 void wand_update(WandEmulator *emu, Hand hand, const MoveController &move, WandInput *out)
 {
     memset(out, 0, sizeof(*out));
-    if (!move.connected)
+    if (!move.connected) { // all released; a drag starts afresh after the reconnection
+        emu->dragging = false;
+        emu->last = *out;
         return;
+    }
     const uint16_t b = move.buttons;
     const uint16_t click_btn = hand == HAND_LEFT ? MOVE_BUTTON_TRIANGLE : MOVE_BUTTON_SQUARE;
     const uint16_t grip_btn = hand == HAND_LEFT ? MOVE_BUTTON_CIRCLE : MOVE_BUTTON_CROSS;
@@ -56,7 +59,8 @@ void wand_update(WandEmulator *emu, Hand hand, const MoveController &move, WandI
     out->menu = (b & menu_btn) != 0;
     out->system = (b & MOVE_BUTTON_START) != 0;
     out->trigger = move.trigger / 255.0f;
-    // The T bit is set from ~16 % of the travel, so the click comes from the analog value.
-    out->trigger_click = out->trigger >= 0.9f;
+    // The T bit is set from ~16 % of the travel, so the click comes from the analog value:
+    // on at 90 %, off below 80 % (a trigger resting near 90 % does not chatter).
+    out->trigger_click = out->trigger >= (emu->last.trigger_click ? 0.8f : 0.9f);
     emu->last = *out;
 }

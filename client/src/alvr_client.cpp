@@ -170,9 +170,12 @@ static long control_recv(uint8_t **buf, size_t *cap, uint64_t timeout_us)
             len = (uint32_t)prefix[0] << 24 | (uint32_t)prefix[1] << 16 | (uint32_t)prefix[2] << 8 | prefix[3];
             if (len > 16 * 1024 * 1024)
                 return -1;
-            if (len > *cap) {
-                *buf = (uint8_t *)realloc(*buf, len);
-                *cap = len;
+            if (len + 1 > *cap) { // + 1: a NUL after the payload for the JSON parsing
+                uint8_t *nb = (uint8_t *)realloc(*buf, len + 1);
+                if (!nb)
+                    return -1;
+                *buf = nb;
+                *cap = len + 1;
             }
             have_len = true;
             got = 0;
@@ -182,6 +185,7 @@ static long control_recv(uint8_t **buf, size_t *cap, uint64_t timeout_us)
             deadline = now_us() + timeout_us; // the rest of the frame follows quickly
             continue;
         }
+        (*buf)[len] = 0;
         return (long)len;
     }
 }
@@ -422,14 +426,25 @@ static void send_custom_interaction_profile()
     control_send(w);
 }
 
+// Play area: Sony's recommended PS VR play area (instruction manual CUH-ZVR1, "Play Area")
+// is a trapezoid in front of the camera, from 0.6 m to 3.0 m away, 0.7 m wide at the near
+// end and 1.9 m at the far end. ALVR 20.14.1 only takes a rectangle (width x depth), which
+// the streamer hands to SteamVR's chaperone centred on the stage origin, that is the play
+// area centre (SetChaperoneArea: SetWorkingPlayAreaSize(w, d), the perimeter at +-w, +-d,
+// bounds hidden: fade distance 0). The rectangle around Sony's area: 1.9 m wide, 2.4 m
+// deep. The streamer also recentres its own tracking on the last head pose when this
+// arrives; it goes out right after StreamReady, before any tracking, so that recentring
+// is the identity.
+static const float PLAY_AREA_WIDTH_M = 1.9f, PLAY_AREA_DEPTH_M = 2.4f;
+
 static void send_playspace_sync()
 {
     uint8_t buf[16];
     BinWriter w{buf, sizeof(buf), 0, false};
     w.variant(C_PLAYSPACE_SYNC);
     w.u8(1); // Some(Vec2)
-    w.f32(2.0f);
-    w.f32(2.0f);
+    w.f32(PLAY_AREA_WIDTH_M);
+    w.f32(PLAY_AREA_DEPTH_M);
     control_send(w);
 }
 
@@ -467,7 +482,7 @@ static void flush_buttons()
     pthread_mutex_unlock(&g_lock);
     if (!n)
         return;
-    uint8_t buf[1024];
+    uint8_t buf[12 + 64 * 16]; // header + 64 entries of at most 16 bytes
     BinWriter w{buf, sizeof(buf), 0, false};
     w.variant(C_BUTTONS);
     w.u64((uint64_t)n);
@@ -501,6 +516,10 @@ static void run_session(int fd, uint32_t server_ip_be)
     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
     setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one));
     fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK);
+    // A streamer that stops reading must not block this thread in send() forever: the
+    // keepalive check then drops the session.
+    timeval send_timeout{1, 0};
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &send_timeout, sizeof(send_timeout));
     char ip[16];
     inet_ntop(AF_INET, &server_ip_be, ip, sizeof(ip));
     pthread_mutex_lock(&g_lock);
@@ -535,6 +554,11 @@ static void run_session(int fd, uint32_t server_ip_be)
         LOG("alvr: StreamConfigPacket session %llu bytes, negotiated: %.*s", (unsigned long long)slen, (int)nlen, neg);
         if (const char *v = json_find(session, slen, "packet_size"))
             g_packet_size = atoi(v);
+        // Shards carry packet_size + 4 - 18 bytes and are built in a 2048-byte buffer.
+        if (g_packet_size < 100 || g_packet_size > 2044) {
+            LOG("alvr: packet_size %d not supported (100-2044), set ALVR's packet size back to 1400", g_packet_size);
+            goto end;
+        }
         int stream_port = 9944;
         if (const char *v = json_find(session, slen, "stream_port"))
             stream_port = atoi(v);
@@ -644,7 +668,9 @@ static void run_session(int fd, uint32_t server_ip_be)
         send_views_config();
         send_custom_interaction_profile();
         send_playspace_sync();
+        pthread_mutex_lock(&g_lock);
         memset(g_input_sent_once, 0, sizeof(g_input_sent_once));
+        pthread_mutex_unlock(&g_lock);
         memset(g_battery_sent_us, 0, sizeof(g_battery_sent_us));
     }
 
@@ -922,10 +948,37 @@ void alvr_send_tracking(uint64_t timestamp_ns, const AlvrDeviceMotion *head, con
     }
 }
 
+void alvr_send_statistics(const AlvrFrameStatistics *st)
+{
+    if (g_status.state != ALVR_STREAMING)
+        return;
+    // ClientStatistics (alvr/packets/src/lib.rs): seven Durations, on the statistics stream.
+    uint8_t buf[96];
+    BinWriter w{buf, sizeof(buf), 0, false};
+    w.duration_ns(st->target_timestamp_ns);
+    w.duration_ns(st->frame_interval_ns);
+    w.duration_ns(st->video_decode_ns);
+    w.duration_ns(st->video_decoder_queue_ns);
+    w.duration_ns(st->rendering_ns);
+    w.duration_ns(st->vsync_queue_ns);
+    w.duration_ns(st->total_pipeline_latency_ns);
+    stream_send(STREAM_STATS, buf, w.len);
+}
+
+// An analog value replaces its queued older value (only the latest counts), so the queue
+// fills only with button edges; a full queue would lose a press or a release for good.
 static void queue_button(uint64_t id, bool scalar, float value)
 {
+    if (scalar)
+        for (int i = 0; i < g_pending_count; i++)
+            if (g_pending[i].id == id) {
+                g_pending[i].value = value;
+                return;
+            }
     if (g_pending_count < 64)
         g_pending[g_pending_count++] = ButtonEntry{id, scalar, value};
+    else
+        LOG("alvr: button queue full, input 0x%llx lost", (unsigned long long)id);
 }
 
 void alvr_update_input(int hand, const AlvrHandInput *in)

@@ -12,12 +12,14 @@ typedef int (*AudioOutOpenFn)(int32_t user, int32_t port, int32_t index, uint32_
 typedef int (*AudioOutOutputFn)(int32_t handle, const void *ptr);
 typedef int (*AudioInOpenFn)(int32_t user, uint32_t type, uint32_t index, uint32_t len, uint32_t freq, uint32_t param);
 typedef int (*AudioInInputFn)(int32_t handle, void *dest);
+typedef int (*AudioInCloseFn)(int32_t handle);
 
 static AudioOutInitFn p_out_init;
 static AudioOutOpenFn p_out_open;
 static AudioOutOutputFn p_out_output;
 static AudioInOpenFn p_in_open;
 static AudioInInputFn p_in_input;
+static AudioInCloseFn p_in_close;
 
 static const uint32_t RATE = 48000;          // the only rate of the output port
 static const uint32_t GRAIN = 256;           // frames per sceAudioOutOutput / sceAudioInInput
@@ -133,6 +135,7 @@ static void *mic_thread(void *)
     static int16_t in[GRAIN * 3];
     static int16_t out[2048];
     uint32_t out_len = 0;
+    int failures = 0; // consecutive input errors
     const uint32_t CHUNK = RATE / 100; // 10 ms packets (960 bytes), within one shard
     for (;;) {
         if (!g_mic_on) {
@@ -142,6 +145,7 @@ static void *mic_thread(void *)
         }
         if (h < 0) {
             // The PSVR microphone is the system's input device while the headset is on.
+            in_rate = RATE;
             h = p_in_open(g_user_id, AUDIO_IN_GENERAL, 0, GRAIN, RATE, FORMAT_S16_MONO);
             if (h < 0) {
                 LOG("audio: microphone (general, 48 kHz) -> 0x%08x, trying voice chat 16 kHz", (unsigned)h);
@@ -156,9 +160,17 @@ static void *mic_thread(void *)
         }
         int rc = p_in_input(h, in);
         if (rc < 0) {
+            // Failing for 1 s (the headset switched off and on, for example): open it again.
+            if (++failures >= 200 && p_in_close) {
+                LOG("audio: microphone input -> 0x%08x for 1 s, opening it again", (unsigned)rc);
+                p_in_close(h);
+                h = -1;
+                failures = 0;
+            }
             sceKernelUsleep(5000);
             continue;
         }
+        failures = 0;
         // 16 kHz fallback: linear interpolation to 48 kHz (the rate announced to ALVR).
         for (uint32_t i = 0; i < GRAIN; i++) {
             if (in_rate == RATE) {
@@ -190,6 +202,7 @@ bool audio_init(int audioout_module, int audioin_module, int user_id, AudioMicSi
     p_out_output = (AudioOutOutputFn)resolve(audioout_module, "sceAudioOutOutput");
     p_in_open = (AudioInOpenFn)resolve(audioin_module, "sceAudioInOpen");
     p_in_input = (AudioInInputFn)resolve(audioin_module, "sceAudioInInput");
+    p_in_close = (AudioInCloseFn)resolve(audioin_module, "sceAudioInClose");
     g_user_id = user_id;
     g_mic_sink = mic_sink;
     pthread_t t;

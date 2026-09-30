@@ -1,5 +1,6 @@
 #include "move.h"
 
+#include <pthread.h>
 #include <string.h>
 
 #include <orbis/libkernel.h>
@@ -182,23 +183,59 @@ void move_update(MoveController ctl[MOVE_MAX])
             c.buttons = d.buttons;
             c.trigger = d.trigger;
         }
-        if (c.vibration_end_us && sceKernelGetProcessTime() >= c.vibration_end_us)
-            move_vibrate(&c, 0, 0);
+        move_vibration_expire(&c);
         // The sphere is driven by the VR tracker itself (as it does for the headset
         // LEDs); setting it from here fought with the tracker and switched it off.
         tracker_update_device(&c.track);
     }
 }
 
-void move_vibrate(MoveController *c, uint8_t intensity, uint32_t duration_ms)
+static int g_vibration_percent = 100;
+
+void move_set_vibration_strength(int percent)
+{
+    g_vibration_percent = percent < 0 ? 0 : percent > 100 ? 100 : percent;
+}
+
+// Game haptics arrive on the network thread while the main thread starts and ends pulses:
+// the motor state and its cached value change together under this lock (a motor could stay
+// on when the cache said off).
+static pthread_mutex_t g_vibration_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void vibrate_locked(MoveController *c, uint8_t intensity, uint32_t duration_ms)
 {
     if (c->handle < 0 || !p_set_vibration)
         return;
-    c->vibration_end_us = duration_ms ? sceKernelGetProcessTime() + duration_ms * 1000ull : 0;
+    intensity = (uint8_t)(intensity * g_vibration_percent / 100); // strength setting (0 = off)
+    const uint64_t now = sceKernelGetProcessTime();
+    c->vibration_end_us = duration_ms ? now + duration_ms * 1000ull : 0;
     if (intensity == c->vibration)
         return;
     int rc = p_set_vibration(c->handle, intensity);
     if (rc != 0)
         LOG("sceMoveSetVibration(0x%x, %u) -> 0x%08x", c->handle, intensity, (unsigned)rc);
     c->vibration = intensity;
+    c->vibration_sent_us = now;
+}
+
+void move_vibrate(MoveController *c, uint8_t intensity, uint32_t duration_ms)
+{
+    pthread_mutex_lock(&g_vibration_lock);
+    vibrate_locked(c, intensity, duration_ms);
+    pthread_mutex_unlock(&g_vibration_lock);
+}
+
+void move_vibration_expire(MoveController *c)
+{
+    pthread_mutex_lock(&g_vibration_lock);
+    const uint64_t now = sceKernelGetProcessTime();
+    if (c->vibration_end_us && now >= c->vibration_end_us) {
+        vibrate_locked(c, 0, 0);
+    } else if (c->vibration && c->handle >= 0 && p_set_vibration && now - c->vibration_sent_us >= 1000000) {
+        // The controller stops its motor by itself a few seconds after the last command
+        // (hardware report: long vibrations stopped): a long one is sent again every second.
+        p_set_vibration(c->handle, c->vibration);
+        c->vibration_sent_us = now;
+    }
+    pthread_mutex_unlock(&g_vibration_lock);
 }

@@ -3,7 +3,7 @@
 #   make VARIANT=stable   -> build the stable .pkg (releases only)
 #   make clean
 
-VERSION     := 01.44
+VERSION     := 01.45
 VARIANT     ?= dev
 
 ifeq ($(VARIANT),stable)
@@ -24,7 +24,9 @@ endif
 
 # param.sfo ATTRIBUTE flags, deduced from installed PSVR games' param.sfo:
 #   0x00004000 = supports PlayStation VR, 0x04000000 = PlayStation VR required
-#   (the system asks for the headset at launch).
+#   (the system asks for the headset at launch). 0x00800000 (PS4 Pro enhanced, Neo mode) was
+#   tried for libSceVideodec2's Pro-only resource type 0x12384: still a software decoder, and
+#   its CreateDecoder fails, so the app stays in base mode.
 ATTRIBUTE   := 0x04004000
 
 # SDK version reported to system libraries (sceKernelGetCompiledSdkVersion). libSceHmd

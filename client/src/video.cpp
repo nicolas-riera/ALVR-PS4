@@ -117,23 +117,71 @@ static ResetFn p_reset;
 // ---------------------------------------------------------------------------------------
 // State
 
-static const int QUEUE_SLOTS = 8;
-static const int MAX_QUEUED = 4;
+// Frames waiting for the decoder. The decoder finishes a frame every ~9 ms at 80 Mbps
+// (110 fps), barely above the 90 fps stream, so frames that arrive bunched (Wi-Fi, PC)
+// wait a moment. With at most 4 waiting, such bursts dropped a frame, and every drop froze
+// the picture until the IDR frame requested came back (up to 32 drops per 5 s in a game,
+// 2026-09-29 logs). Now a burst waits (up to MAX_QUEUED); only a backlog that lasts
+// (BACKLOG_US with BACKLOG_FRAMES or more waiting: the decoder cannot keep up) or a full
+// queue drops frames.
+static const int QUEUE_SLOTS = 12;
+static const int MAX_QUEUED = 10;
+static const int BACKLOG_FRAMES = 4;
+static const uint64_t BACKLOG_US = 1000000;
 static const size_t CONFIG_MAX = 1024;       // SPS/PPS, prepended to IDR frames in place
 static const size_t SLOT_SIZE = 3 << 20;     // largest access unit accepted (+ CONFIG_MAX)
 // Converted frames wait in a small FIFO for the display (READY_MAX), then are displayed; the
 // previously displayed set may still be read by the compositor pass in progress.
-static const int READY_MAX = 3;
+static const int READY_MAX = 5;
 static const int EYE_SETS = READY_MAX + 3;   // ready, displayed, previously displayed, writing
+// Paced display (video_next). The PC sends one frame per period of its own clock (90.00
+// fps), very regularly; the network, decoding and conversion add jitter. Each converted
+// frame gets a due time on a schedule that advances exactly one PC frame period per frame:
+// it follows (at most +0.1 ms / -0.02 ms per frame) the earliest-arrival line (one point
+// per period, following the frames that arrive earliest) plus a margin, the 99th percentile
+// of how late frames came behind that line over the last ~11 s (+0.5 ms). (The latest of
+// them, first used, sat at a full period in games: every PC or network hiccup counted.) At
+// each decision point (just before a compositor pass, see main.cpp) the newest frame that is
+// due is shown and older ones are skipped, with a small hysteresis (PACING_HYSTERESIS_US). Frames thus wait the jitter margin plus their phase to the next pass
+// (0-11 ms), and the choice follows the smooth schedule, not each frame's jittery arrival:
+// no repeat and skip pairs when a frame is ready right around a decision point. The PC's
+// clock runs slightly faster than the headset (90.00 against 89.91 Hz): once per ~11 s two
+// frames are due at one decision and one is skipped. A frame later than the margin makes a
+// repeat (the margin then covers it for the next ~11 s).
+// Simulated on the arrival jitter of the hardware logs (tools: scratch simulation): frames
+// wait 12-15 ms on average against 19.5-20 ms with a reserve of one whole frame (and ~30 ms
+// with the adaptive 1-3 reserve of the first test: ~80 ms from tracking to photon, against
+// ~58 ms with 1); 2-3 repeats per minute on a steady network, plus one per lost frame.
+static const int JITTER_SAMPLES = 1024; // ~11 s at 90 fps
+static const uint64_t MARGIN_EXTRA_US = 500, MARGIN_INITIAL_US = 3000;
+static const uint64_t SCHEDULE_UP_US = 100, SCHEDULE_DOWN_US = 20, LINE_CREEP_US = 10; // per frame
+// Decision hysteresis. The decision time jitters by a few ms (the loop's lead before the
+// pass moves between 1 and 6 ms, plus its wake-up), so frames due right around it came one
+// decision late now and then, and the next decision skipped one: a repeat and skip pair
+// each time (hardware logs: 20-40 per 5 s at 90 fps). Now the oldest frame waiting is shown
+// when due within PACING_HYSTERESIS_US after the decision, and frames are skipped only for
+// a newer one due more than that before it. Simulated (scratch decision_sim, the real
+// pacing_due, the loop's lead and wake-up jitter): 5.7 pairs per 5 s -> 0 on a steady
+// network, 22 -> 15 with frequent 5-40 ms delays, for 0.2-0.6 ms more waiting on average.
+static const uint64_t PACING_HYSTERESIS_US = 1500;
 // Decoder pipeline depth: a Decode call returns the picture of the access unit given
 // depth - 1 calls before, and blocks until it is ready. A picture takes ~20 ms from its
-// access unit to being ready, although the hardware finishes one every 7-10 ms: at 1 every
+// access unit to being ready, although the decoder finishes one every 7-10 ms: at 1 every
 // call waited for its own picture; at 2 each call waited ~11 ms at 90 fps, just over the
 // 11.1 ms frame time (queue full, drops, 45 ms added). At 3 the calls do not wait: 90 fps
 // without drops up to 130 Mbps, 28 ms from arrival to display (video bench, 2026-09-29);
 // 4 only adds a frame of latency.
+// Depth 2 on small frames (1536x832: 17 ms instead of 23 ms at depth 3, fine in the bench)
+// made the pictures come out irregularly in a game: 40-80 repeated and skipped frames per
+// 5 s against 12-35 at depth 3 (2026-09-30), visible judder. Depth 3 stays.
 static const uint32_t DECODE_DEPTH = 3;
+// At 60 fps depth 2 is enough (each call waits ~3 ms: the 16.7 ms frame time is well above
+// what the decoder needs; it was the depth before 90 Hz), and depth 3 would hold every picture
+// a whole 16.7 ms frame longer.
+static const uint32_t DECODE_DEPTH_60FPS = 2;
 static uint32_t g_decode_depth = DECODE_DEPTH; // video bench option
+static uint32_t g_use_depth = DECODE_DEPTH;    // depth the next decoder is created with
+static uint32_t g_stream_period_us = 11111;    // stream frame period (video_set_frame_period), under g_lock
 
 struct Slot {
     uint8_t *mem; // CONFIG_MAX bytes of headroom, then the frame
@@ -141,6 +189,7 @@ struct Slot {
     uint64_t timestamp_ns;
     uint64_t received_us;
     bool idr;
+    unsigned epoch; // g_epoch when queued
 };
 
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -160,6 +209,9 @@ static bool g_full_range = true;
 static bool g_ffe;                                  // foveated encoding: frame squeezed
 static FoveationAxis g_ffe_x, g_ffe_y;
 static unsigned g_stream_gen;                       // bumped by every video_set_stream
+// Bumped by video_reset and by a pause or resume: frames queued, decoded or converted in an
+// older epoch are dropped, so a picture from before is never shown again.
+static unsigned g_epoch;
 static VideoStats g_stats;
 
 // Decoder (decode thread only).
@@ -176,7 +228,9 @@ struct Decoded {
     int fb;
     uint32_t width, height, pitch;
     uint64_t timestamp_ns;
-    uint64_t received_us; // when the access unit was queued (video bench latency)
+    uint64_t received_us; // when the access unit was queued (video bench latency, ALVR statistics)
+    uint64_t picture_us;  // when the decoder returned the picture
+    unsigned epoch;
 };
 static pthread_mutex_t g_dec_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_dec_cond = PTHREAD_COND_INITIALIZER;
@@ -191,16 +245,104 @@ static uint32_t g_eye_w, g_eye_h, g_eye_pitch;
 static pthread_mutex_t g_pub_lock = PTHREAD_MUTEX_INITIALIZER;
 struct Ready {
     int set;
-    uint64_t timestamp_ns, decoded_us;
+    uint64_t timestamp_ns, decoded_us, received_us, picture_us;
+    uint64_t due_us; // may be shown from then (paced display)
 };
 static Ready g_ready[READY_MAX]; // oldest first
 static int g_ready_count;
 static bool g_stream_valid;      // a frame was published since the last reset
+static unsigned g_pub_epoch;     // g_epoch, as seen by the publication side
 static int g_displayed = -1, g_prev_displayed = -1;
-static uint64_t g_disp_ts, g_disp_decoded_us;
+static bool g_disp_valid;        // g_displayed was taken since the last reset (else it is only kept from reuse)
+static uint64_t g_disp_ts, g_disp_decoded_us, g_disp_received_us, g_disp_picture_us;
 static unsigned g_disp_seq;      // increments with every frame taken for display
 static unsigned g_pub_seq;
 static unsigned g_ready_overflow, g_ready_trimmed; // frames never displayed (FIFO full / trimmed)
+static struct {
+    uint64_t period_us = 11111; // PC frame period (video_set_frame_period)
+    bool line_valid;
+    uint64_t line_us;           // earliest-arrival line at the last frame
+    uint64_t last_ready_us, last_ts_ns;
+    uint32_t lateness[JITTER_SAMPLES]; // behind the line, microseconds
+    int lateness_count, lateness_head;
+    uint64_t margin_us = MARGIN_INITIAL_US;
+    uint64_t schedule_us;       // due time of the last frame
+    uint64_t hold_us;           // how long the last frame is held after its conversion (log)
+    uint64_t last_decision_us;
+    unsigned late;              // frames shown after the decision point they were due at
+    unsigned resyncs;           // safety net used (should stay 0)
+} g_pacing;
+
+// Due time of a frame converted at `ready` (tracking timestamp ts_ns), under g_pub_lock.
+static uint64_t pacing_due(uint64_t ready, uint64_t ts_ns)
+{
+    auto &pc = g_pacing;
+    const uint64_t T = pc.period_us;
+    uint64_t n = 0; // PC frame periods since the last frame (0: the schedule starts again)
+    if (!pc.line_valid || ready - pc.last_ready_us > 300000) { // first frame, or after a stall
+        pc.line_valid = true;
+        pc.line_us = ready;
+        pc.lateness_count = pc.lateness_head = 0;
+        pc.margin_us = MARGIN_INITIAL_US;
+    } else {
+        // PC frame periods since the last frame, from the time since the line's last point,
+        // less half the margin (frames come up to the margin behind the line: a frame 6 ms
+        // late was counted for two periods). A frame that seems two or more periods on but
+        // whose tracking timestamp moved by less than 1.5 periods is a late frame, not one
+        // after a lost frame. (The timestamps follow the PS4's tracking uplink, not the PC's
+        // frames, so they only settle that case: counting periods from them pushed the
+        // schedule a period ahead at each double uplink gap, until no frame was ever due;
+        // hardware test, the video stalled and the lobby came back.)
+        const uint64_t offset = pc.margin_us / 2 < T / 2 ? pc.margin_us / 2 : T / 2;
+        n = ready > pc.line_us + offset ? (ready - pc.line_us - offset + T / 2) / T : 1;
+        if (n < 1)
+            n = 1;
+        if (n >= 2 && ts_ns > pc.last_ts_ns && pc.last_ts_ns && ts_ns - pc.last_ts_ns < T * 1500)
+            n = 1;
+        const uint64_t predicted = pc.line_us + n * T;
+        // The line is the earliest arrivals: an earlier frame moves it there; otherwise it
+        // creeps up 10 us per frame (follows a path that got slower), the margin covering the
+        // jitter above it.
+        pc.line_us = ready < predicted + LINE_CREEP_US ? ready : predicted + LINE_CREEP_US; // never after ready
+    }
+    pc.last_ready_us = ready;
+    pc.last_ts_ns = ts_ns;
+    const uint64_t late = ready > pc.line_us ? ready - pc.line_us : 0;
+    pc.lateness[pc.lateness_head] = late > 0xffffffffu ? 0xffffffffu : (uint32_t)late;
+    pc.lateness_head = (pc.lateness_head + 1) % JITTER_SAMPLES;
+    if (pc.lateness_count < JITTER_SAMPLES)
+        pc.lateness_count++;
+    if (pc.lateness_count >= 32 && pc.lateness_head % 16 == 0) { // every 16 frames
+        // 99th percentile: the (count / 100 + 1)-th largest.
+        const int k = pc.lateness_count / 100 + 1; // up to 11
+        uint32_t top[12] = {};
+        for (int i = 0; i < pc.lateness_count; i++) {
+            uint32_t v = pc.lateness[i];
+            for (int j = 0; j < k && v; j++)
+                if (v > top[j]) {
+                    const uint32_t t = top[j];
+                    top[j] = v;
+                    v = t;
+                }
+        }
+        const uint64_t m = top[k - 1] + MARGIN_EXTRA_US;
+        pc.margin_us = m > T ? T : m;
+    }
+    const uint64_t target = pc.line_us + pc.margin_us;
+    const uint64_t next = pc.schedule_us + n * T;
+    if (n == 0 || next > target + T / 2 || target > next + T / 2) {
+        // Start, or more than half a period off (a frame counted for the wrong period):
+        // back on the target at once.
+        pc.schedule_us = target;
+    } else {
+        pc.schedule_us = target > next ? next + (target - next < SCHEDULE_UP_US ? target - next : SCHEDULE_UP_US)
+                                       : next - (next - target < SCHEDULE_DOWN_US ? next - target : SCHEDULE_DOWN_US);
+    }
+    pc.hold_us = pc.schedule_us > ready ? pc.schedule_us - ready : 0;
+    return pc.schedule_us;
+}
+static unsigned g_replaced; // decoded pictures replaced before their conversion (never shown)
+static bool g_paused;       // video_set_paused: frames received are not decoded
 static unsigned g_bench_pub_seq; // g_pub_seq when the bench began
 static uint64_t g_bench_bytes;   // access unit bytes queued during the bench
 
@@ -254,6 +396,7 @@ static void *alloc_direct(size_t size, size_t align, int mem_type, const char *w
     rc = sceKernelMapDirectMemory(&ptr, size, 0x33, 0, phys, align);
     if (rc < 0) {
         LOG("video: map %s failed 0x%08x", what, (unsigned)rc);
+        sceKernelReleaseDirectMemory(phys, size);
         return nullptr;
     }
     return ptr;
@@ -673,6 +816,97 @@ static void *convert_thread(void *arg)
     return nullptr;
 }
 
+// ---------------------------------------------------------------------------------------
+// Performance overlay: text lines drawn into both eyes of each converted frame, below the
+// centre of the view, straight ahead at OVERLAY_DEPTH_M (each eye offset for its own
+// position), on a darkened box. Drawn in the eye buffers, it follows the head like the
+// picture it is part of.
+
+#include "font_data.h"
+
+static const int OVERLAY_LINES = 4, OVERLAY_CHARS = 64;
+static const float OVERLAY_DEPTH_M = 1.5f, OVERLAY_HALF_IPD_M = 0.0315f;
+static const float OVERLAY_TAN_Y = -0.30f; // box centre, as the tangent of the angle below the view centre
+static pthread_mutex_t g_overlay_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct {
+    int count;
+    char text[OVERLAY_LINES][OVERLAY_CHARS];
+    uint32_t rgb[OVERLAY_LINES];
+    float tan[2][4]; // per eye: left, right, up, down
+} g_overlay;
+
+void video_set_overlay(const char *const *lines, const uint32_t *rgb, int count, const float tangents[2][4])
+{
+    pthread_mutex_lock(&g_overlay_lock);
+    g_overlay.count = count < 0 ? 0 : count > OVERLAY_LINES ? OVERLAY_LINES : count;
+    for (int i = 0; i < g_overlay.count; i++) {
+        strncpy(g_overlay.text[i], lines[i], OVERLAY_CHARS - 1);
+        g_overlay.text[i][OVERLAY_CHARS - 1] = 0;
+        g_overlay.rgb[i] = rgb ? rgb[i] : 0xffffff;
+    }
+    if (tangents)
+        memcpy(g_overlay.tan, tangents, sizeof(g_overlay.tan));
+    pthread_mutex_unlock(&g_overlay_lock);
+}
+
+static void draw_overlay(int set)
+{
+    pthread_mutex_lock(&g_overlay_lock);
+    const int n = g_overlay.count;
+    if (n == 0 || g_overlay.tan[0][0] + g_overlay.tan[0][1] <= 0.0f || g_overlay.tan[0][2] + g_overlay.tan[0][3] <= 0.0f ||
+        g_overlay.tan[1][0] + g_overlay.tan[1][1] <= 0.0f || g_overlay.tan[1][2] + g_overlay.tan[1][3] <= 0.0f) {
+        pthread_mutex_unlock(&g_overlay_lock);
+        return;
+    }
+    static char text[OVERLAY_LINES][OVERLAY_CHARS];
+    static uint32_t rgb[OVERLAY_LINES];
+    float tan[2][4];
+    memcpy(text, g_overlay.text, sizeof(text));
+    memcpy(rgb, g_overlay.rgb, sizeof(rgb));
+    memcpy(tan, g_overlay.tan, sizeof(tan));
+    pthread_mutex_unlock(&g_overlay_lock);
+
+    const int W = (int)g_eye_w, H = (int)g_eye_h, pitch = (int)g_eye_pitch;
+    // Glyphs doubled on large eye buffers (above 1600 pixels wide), so the text keeps its size.
+    const int scale = W > 1600 ? 2 : 1, lh = (FONT_H + 4) * scale, pad = 10 * scale;
+    int chars = 0;
+    for (int i = 0; i < n; i++) {
+        const int l = (int)strlen(text[i]);
+        chars = l > chars ? l : chars;
+    }
+    const int bw = chars * FONT_W * scale + 2 * pad, bh = n * lh + 2 * pad - 4 * scale;
+    for (int e = 0; e < 2; e++) {
+        const float *t = tan[e];
+        const float tx = (e == 0 ? OVERLAY_HALF_IPD_M : -OVERLAY_HALF_IPD_M) / OVERLAY_DEPTH_M;
+        const int cx = (int)((t[0] + tx) / (t[0] + t[1]) * W), cy = (int)((t[2] - OVERLAY_TAN_Y) / (t[2] + t[3]) * H);
+        const int x0 = cx - bw / 2, y0 = cy - bh / 2;
+        uint32_t *img = g_eye_mem[set][e];
+        for (int y = y0 < 0 ? 0 : y0; y < y0 + bh && y < H; y++) {
+            uint32_t *row = img + (size_t)y * pitch;
+            for (int x = x0 < 0 ? 0 : x0; x < x0 + bw && x < W; x++)
+                row[x] = (row[x] & 0xff000000) | ((row[x] >> 2) & 0x3f3f3f); // a quarter of the brightness
+        }
+        for (int i = 0; i < n; i++) {
+            const uint32_t px = 0x80000000 | rgb[i]; // alpha as the conversion writes it
+            int x = x0 + pad;
+            for (const char *c = text[i]; *c; c++, x += FONT_W * scale) {
+                const unsigned ch = (unsigned char)*c < FONT_FIRST || (unsigned char)*c > FONT_LAST ? '?' : (unsigned char)*c;
+                const uint16_t *glyph = font_data[ch - FONT_FIRST];
+                for (int gy = 0; gy < FONT_H * scale; gy++) {
+                    const int y = y0 + pad + i * lh + gy;
+                    if (y < 0 || y >= H)
+                        continue;
+                    const uint16_t bits = glyph[gy / scale];
+                    uint32_t *row = img + (size_t)y * pitch;
+                    for (int gx = 0; gx < FONT_W * scale; gx++)
+                        if ((bits & (1 << (FONT_W - 1 - gx / scale))) && x + gx >= 0 && x + gx < W)
+                            row[x + gx] = px;
+                }
+            }
+        }
+    }
+}
+
 static bool alloc_eye_buffers(uint32_t w, uint32_t h)
 {
     if (g_eye_mem[0][0] && w == g_eye_w && h == g_eye_h)
@@ -691,11 +925,10 @@ static bool alloc_eye_buffers(uint32_t w, uint32_t h)
                 g_eye_mem[s][e] = (uint32_t *)(mem + each * (s * 2 + e));
     }
     uint32_t pitch = (w + 63) & ~63u;
+    // No clearing: every set is fully written before it is shown (and one may be on screen).
     for (int s = 0; s < EYE_SETS; s++)
-        for (int e = 0; e < 2; e++) {
-            memset(g_eye_mem[s][e], 0, each);
+        for (int e = 0; e < 2; e++)
             gnm_texture_linear_bgra(&g_eye_tex[s][e], g_eye_mem[s][e], w, h, pitch);
-        }
     g_eye_w = w;
     g_eye_h = h;
     g_eye_pitch = pitch;
@@ -724,7 +957,11 @@ static bool create_compute_queue()
         LOG("video: sceVideodec2QueryComputeMemoryInfo -> 0x%08x", (unsigned)rc);
         return false;
     }
-    mem.cpu_gpu_memory = alloc_direct(mem.cpu_gpu_memory_size, 0x10000, MEM_ONION, "compute queue");
+    // Allocated once: a failed attempt keeps it for the next one.
+    static void *queue_mem;
+    if (!queue_mem)
+        queue_mem = alloc_direct(mem.cpu_gpu_memory_size, 0x10000, MEM_ONION, "compute queue");
+    mem.cpu_gpu_memory = queue_mem;
     if (!mem.cpu_gpu_memory)
         return false;
     // Pipes/queues possibly taken by the tracker or the compositor are skipped on failure.
@@ -744,24 +981,34 @@ static bool create_compute_queue()
     return false;
 }
 
-static bool create_decoder(uint32_t width, uint32_t height)
+static void delete_decoder()
 {
-    if (g_decoder) {
-        p_delete(g_decoder);
-        g_decoder = nullptr;
-    }
+    if (!g_decoder)
+        return;
+    p_delete(g_decoder);
+    g_decoder = nullptr;
+}
+
+static bool create_decoder(uint32_t width, uint32_t height, uint32_t codec)
+{
+    delete_decoder();
     if (!create_compute_queue())
         return false;
     Vdec2ConfigInfo cfg{};
     cfg.this_size = sizeof(cfg);
+    // resource_type 1: the decoder the system offers apps, software (libSceVdecSavc2 on the
+    // CPU + GPU compute; reference/decomp/vdeccore_*.c). The other types it accepts, 0xb6c8
+    // and the PS4 Pro's 0x12384 (Pro mode apps only), run the same software core and failed
+    // to create (2026-09-30). HEVC: codec 0xee049, profile 1 (Main), level_idc 153 (5.1);
+    // it decodes, but slower than H.264.
     cfg.resource_type = 1;
-    cfg.codec_type = 1; // AVC
-    cfg.profile = 100;  // High (covers Main and Baseline streams)
-    cfg.max_level = 52;
+    cfg.codec_type = codec == 1 ? 0xee049 : 1;
+    cfg.profile = codec == 1 ? 1 : 100; // H.264 High covers Main and Baseline streams
+    cfg.max_level = codec == 1 ? 153 : 52;
     cfg.max_frame_width = (int32_t)((width + 15) & ~15u);
     cfg.max_frame_height = (int32_t)((height + 15) & ~15u);
     cfg.max_dpb_frame_count = 16;
-    cfg.decode_pipeline_depth = g_decode_depth;
+    cfg.decode_pipeline_depth = g_use_depth;
     cfg.compute_queue = g_compute_queue;
     cfg.cpu_affinity_mask = 0x3f;
     cfg.cpu_thread_priority = 256; // highest allowed: decoding is on the latency path
@@ -770,8 +1017,10 @@ static bool create_decoder(uint32_t width, uint32_t height)
     Vdec2MemoryInfo mem{};
     mem.this_size = sizeof(mem);
     int rc = p_query_decoder(&cfg, &mem);
-    LOG("video: QueryDecoderMemoryInfo %dx%d -> 0x%08x cpu 0x%llx gpu 0x%llx cpu_gpu 0x%llx frame 0x%llx align 0x%x",
-        cfg.max_frame_width, cfg.max_frame_height, (unsigned)rc, (unsigned long long)mem.cpu_memory_size,
+    LOG("video: QueryDecoderMemoryInfo %s depth %u %dx%d -> 0x%08x cpu 0x%llx gpu 0x%llx cpu_gpu 0x%llx frame 0x%llx "
+        "align 0x%x",
+        codec == 1 ? "HEVC" : "H.264", cfg.decode_pipeline_depth, cfg.max_frame_width, cfg.max_frame_height,
+        (unsigned)rc, (unsigned long long)mem.cpu_memory_size,
         (unsigned long long)mem.gpu_memory_size, (unsigned long long)mem.cpu_gpu_memory_size,
         (unsigned long long)mem.max_frame_buffer_size, mem.frame_buffer_alignment);
     if (rc != 0)
@@ -817,7 +1066,7 @@ static bool create_decoder(uint32_t width, uint32_t height)
     }
     g_dec_w = width;
     g_dec_h = height;
-    g_dec_depth = g_decode_depth;
+    g_dec_depth = g_use_depth;
     return true;
 }
 
@@ -909,10 +1158,12 @@ static void decode_one(Slot &s, const uint8_t *config, size_t config_len)
     // Hand the picture to the conversion thread; an older one it has not started is
     // replaced (its frame buffer becomes free again). Decoding and conversion overlap.
     pthread_mutex_lock(&g_dec_lock);
-    if (g_has_pending)
-        g_bench.replaced++; // the conversion is behind: that picture is never shown
+    if (g_has_pending) { // the conversion is behind: that picture is never shown
+        g_bench.replaced++;
+        g_replaced++;
+    }
     g_pending = Decoded{fb_index, out.frame_width, out.frame_height,
-                        out.frame_pitch_in_bytes ? out.frame_pitch_in_bytes : out.frame_pitch, ts, rx};
+                        out.frame_pitch_in_bytes ? out.frame_pitch_in_bytes : out.frame_pitch, ts, rx, t1, s.epoch};
     g_has_pending = true;
     pthread_cond_signal(&g_dec_cond);
     pthread_mutex_unlock(&g_dec_lock);
@@ -937,7 +1188,14 @@ static void *convert_main_thread(void *)
         bool full_range = g_full_range, ffe = g_ffe;
         FoveationAxis ax = g_ffe_x, ay = g_ffe_y;
         unsigned stream_gen = g_stream_gen;
+        const bool stale = d.epoch != g_epoch;
         pthread_mutex_unlock(&g_lock);
+        if (stale) { // decoded before a reset or a pause
+            pthread_mutex_lock(&g_dec_lock);
+            g_converting_fb = -1;
+            pthread_mutex_unlock(&g_dec_lock);
+            continue;
+        }
         if (ffe && (d.width < ax.compressed * 2 || d.height < ay.compressed)) {
             static bool warned;
             if (!warned)
@@ -946,7 +1204,9 @@ static void *convert_main_thread(void *)
             warned = true;
             ffe = false;
         }
-        if (ffe) {
+        if (ffe && (eye_w > EYE_MAX_W || eye_h > EYE_MAX_H)) {
+            // Too large for the LUT and the eye buffers: alloc_eye_buffers refuses it below.
+        } else if (ffe) {
             static unsigned lut_for; // stream generation + 1 the LUT was built for
             if (lut_for != stream_gen + 1) {
                 build_ffe_lut(eye_w, eye_h, ax, ay);
@@ -1002,18 +1262,27 @@ static void *convert_main_thread(void *)
             while (g_jobs_done < (unsigned)jobs - 1)
                 pthread_cond_wait(&g_job_cond, &g_job_lock);
             pthread_mutex_unlock(&g_job_lock);
+            draw_overlay(w);
             uint64_t t1 = now_us();
             bench_record(&g_bench.convert, t1 - t0);
             if (d.received_us)
                 bench_record(&g_bench.latency, t1 - d.received_us);
 
             pthread_mutex_lock(&g_pub_lock);
+            if (d.epoch != g_pub_epoch) { // reset or paused during the conversion
+                pthread_mutex_unlock(&g_pub_lock);
+                pthread_mutex_lock(&g_dec_lock);
+                g_converting_fb = -1;
+                pthread_mutex_unlock(&g_dec_lock);
+                continue;
+            }
             if (g_ready_count == READY_MAX) { // the display is behind: the oldest is never shown
                 memmove(&g_ready[0], &g_ready[1], sizeof(Ready) * (READY_MAX - 1));
                 g_ready_count--;
                 g_ready_overflow++;
             }
-            g_ready[g_ready_count++] = Ready{w, d.timestamp_ns, t1};
+            g_ready[g_ready_count++] = Ready{w, d.timestamp_ns, t1, d.received_us, d.picture_us,
+                                             pacing_due(t1, d.timestamp_ns)};
             g_stream_valid = true;
             g_pub_seq++;
             pthread_mutex_unlock(&g_pub_lock);
@@ -1035,26 +1304,51 @@ static void *decode_thread(void *)
         while (g_count == 0)
             pthread_cond_wait(&g_cond, &g_lock);
         Slot s = g_slots[g_head];
+        const unsigned epoch = g_epoch;
         unsigned gen = g_config_gen;
         uint32_t codec = g_codec, fw = g_frame_w, fh = g_frame_h;
         static uint8_t config[CONFIG_MAX];
         size_t config_len = s.idr ? g_config_len : 0;
         memcpy(config, g_config, config_len);
+        g_use_depth = g_bench.on ? g_decode_depth : g_stream_period_us > 14000 ? DECODE_DEPTH_60FPS : DECODE_DEPTH;
+        const uint32_t use_depth = g_use_depth;
         pthread_mutex_unlock(&g_lock);
 
-        bool ok = true;
-        if (!g_decoder || gen != g_decoder_gen || g_dec_depth != g_decode_depth) {
-            if (codec != 0) {
+        // A new epoch (reset, pause, resume): the pictures still inside the decoder and the
+        // one waiting for conversion are from before; slots queued before are skipped.
+        static unsigned dec_epoch;
+        if (epoch != dec_epoch) {
+            dec_epoch = epoch;
+            if (g_decoder)
+                p_reset(g_decoder);
+            ts_fifo_clear();
+            pthread_mutex_lock(&g_dec_lock);
+            g_has_pending = false;
+            pthread_mutex_unlock(&g_dec_lock);
+        }
+        bool ok = s.epoch == epoch;
+        // A failed creation is retried only with a new DecoderConfig or pipeline depth, not
+        // at every frame (each attempt logs and may allocate).
+        static bool create_failed;
+        static unsigned failed_gen;
+        static uint32_t failed_depth;
+        const bool blocked = create_failed && gen == failed_gen && use_depth == failed_depth;
+        if (ok && !blocked && (!g_decoder || gen != g_decoder_gen || g_dec_depth != use_depth)) {
+            // ALVR codec 0 = H.264, 1 = HEVC.
+            if (codec > 1) {
                 static bool warned;
                 if (!warned)
-                    LOG("video: codec %u is not supported, set the streamer to H264", codec);
+                    LOG("video: codec %u is not supported, set the streamer to H264 or HEVC", codec);
                 warned = true;
                 ok = false;
             } else {
-                ok = create_decoder(fw, fh);
+                ok = create_decoder(fw, fh, codec);
+                create_failed = !ok;
+                failed_gen = gen;
+                failed_depth = use_depth;
                 if (!ok)
-                    LOG("video: decoder creation failed");
-                g_decoder_gen = gen; // do not retry every frame; a new DecoderConfig retries
+                    LOG("video: decoder creation failed (retried with the next DecoderConfig)");
+                g_decoder_gen = gen;
             }
         }
         if (ok && g_decoder)
@@ -1132,11 +1426,11 @@ void video_set_stream(uint32_t view_width, uint32_t view_height, bool full_range
 void video_set_decoder_config(uint32_t codec, const uint8_t *config, size_t len)
 {
     pthread_mutex_lock(&g_lock);
-    bool changed = codec != g_codec || len != g_config_len || memcmp(config, g_config, len) != 0;
     if (len > CONFIG_MAX) {
         LOG("video: decoder config too large (%zu bytes)", len);
         len = 0;
     }
+    bool changed = codec != g_codec || len != g_config_len || memcmp(config, g_config, len) != 0;
     if (changed) {
         g_codec = codec;
         memcpy(g_config, config, len);
@@ -1153,17 +1447,50 @@ void video_push_frame(uint64_t timestamp_ns, bool is_idr, const uint8_t *data, s
 {
     pthread_mutex_lock(&g_lock);
     g_stats.received++;
+    // Arrival regularity: gaps well above the usual frame interval, frames bunched together.
+    const uint64_t t = now_us();
+    static uint64_t last_arrival_us, interval_avg_us;
+    if (last_arrival_us && t > last_arrival_us && t - last_arrival_us < 500000) {
+        const uint64_t gap = t - last_arrival_us;
+        if (interval_avg_us && gap > interval_avg_us * 18 / 10)
+            g_stats.arrival_gaps++;
+        if (gap < 2000)
+            g_stats.arrival_bunched++;
+        if (gap > g_stats.arrival_gap_max_us)
+            g_stats.arrival_gap_max_us = gap;
+        interval_avg_us = interval_avg_us ? (interval_avg_us * 63 + gap) / 64 : gap;
+    }
+    last_arrival_us = t;
+    g_stats.bytes_total += len;
+    if (g_paused) { // lobby while streaming: nothing is decoded
+        pthread_mutex_unlock(&g_lock);
+        return;
+    }
+    if (len > SLOT_SIZE - CONFIG_MAX) { // too large for a slot: the next frames lack it
+        g_stats.dropped++;
+        if (!g_bench.on)
+            request_idr_locked();
+        pthread_mutex_unlock(&g_lock);
+        return;
+    }
     if (is_idr)
         g_wait_idr = false;
-    if (g_wait_idr || g_config_len == 0 || len > SLOT_SIZE - CONFIG_MAX) {
+    if (g_wait_idr || g_config_len == 0) {
         g_stats.dropped++;
         pthread_mutex_unlock(&g_lock);
         return;
     }
-    // More than MAX_QUEUED frames waiting (~67 ms at 60 Hz) would only add latency (up to
-    // 190 ms was seen in busy Beat Saber scenes): drop them and restart from an IDR.
-    if (g_count >= MAX_QUEUED) {
+    // A full queue, or a backlog that does not go away, would only add latency (up to 190 ms
+    // was seen in busy Beat Saber scenes before the decoder pipeline was deepened): drop the
+    // frame and restart from an IDR.
+    static uint64_t backlog_since;
+    if (g_count < BACKLOG_FRAMES)
+        backlog_since = 0;
+    else if (!backlog_since)
+        backlog_since = t;
+    if (g_count >= MAX_QUEUED || (backlog_since && t - backlog_since >= BACKLOG_US)) {
         g_stats.dropped++;
+        backlog_since = 0;
         if (!g_bench.on) // a bench clip has no IDR to come back to
             request_idr_locked();
         pthread_mutex_unlock(&g_lock);
@@ -1173,8 +1500,9 @@ void video_push_frame(uint64_t timestamp_ns, bool is_idr, const uint8_t *data, s
     memcpy(s.mem + CONFIG_MAX, data, len);
     s.len = len;
     s.timestamp_ns = timestamp_ns;
-    s.received_us = now_us();
+    s.received_us = t;
     s.idr = is_idr;
+    s.epoch = g_epoch;
     g_count++;
     g_stats.bytes_avg = (g_stats.bytes_avg * 15 + len) / 16;
     if (g_bench.on)
@@ -1285,7 +1613,8 @@ bool video_want_idr()
     // (the streamer's minimum IDR interval); while frames are still dropped waiting for the
     // configuration or the IDR, ask again every 500 ms (lost request).
     uint64_t since = t - g_last_idr_request_us;
-    bool want = (g_want_idr && since >= 100000) || ((g_wait_idr || !g_config_len) && since >= 500000);
+    // Nothing while paused (lobby): the request is made when the stream resumes.
+    bool want = !g_paused && ((g_want_idr && since >= 100000) || ((g_wait_idr || !g_config_len) && since >= 500000));
     if (want) {
         g_want_idr = false;
         g_last_idr_request_us = t;
@@ -1296,57 +1625,75 @@ bool video_want_idr()
 
 void video_reset()
 {
-    // Queued frames are left to the decode thread (it owns the head slot); without a
-    // configuration they are dropped at the next IDR wait anyway.
+    // Queued frames are left to the decode thread (it owns the head slot): from an older
+    // epoch, they are skipped.
     pthread_mutex_lock(&g_lock);
     g_wait_idr = true;
     g_want_idr = false;
     g_config_len = 0;
     g_codec = 0xffffffff;
+    const unsigned epoch = ++g_epoch;
     pthread_mutex_unlock(&g_lock);
     pthread_mutex_lock(&g_pub_lock);
+    g_pub_epoch = epoch;
     g_stream_valid = false;
+    g_disp_valid = false;
     g_ready_count = 0;
+    g_pacing.line_valid = false;
     pthread_mutex_unlock(&g_pub_lock);
 }
 
-bool video_next(VideoFrame *out, bool take, int keep)
+bool video_next(VideoFrame *out, bool take, bool paced)
 {
     pthread_mutex_lock(&g_pub_lock);
-    if (take && g_ready_count > 0) {
-        // More waiting than the display needs: after a burst (frames delayed on the PC or
-        // the network, then arriving together) the extra reserve is kept for a while, it
-        // absorbs the next delay; only a surplus that lasts 1 s (the PC runs slightly
-        // faster than the headset) skips the oldest.
-        static uint64_t surplus_since;
+    int pick = -1;
+    if (take && paced) {
+        // The newest frame due more than the hysteresis before now (older ones are skipped),
+        // else the oldest one if due by then (see PACING_HYSTERESIS_US).
         const uint64_t t = now_us();
-        if (g_ready_count <= keep + 1)
-            surplus_since = 0;
-        else if (!surplus_since)
-            surplus_since = t;
-        if (surplus_since && t - surplus_since >= 1000000) {
-            while (g_ready_count > keep + 1) {
-                memmove(&g_ready[0], &g_ready[1], sizeof(Ready) * (READY_MAX - 1));
-                g_ready_count--;
-                g_ready_trimmed++;
-            }
-            surplus_since = 0;
+        for (int i = 0; i < g_ready_count; i++)
+            if (g_ready[i].due_us + PACING_HYSTERESIS_US <= t)
+                pick = i;
+        if (pick < 0 && g_ready_count > 0 && g_ready[0].due_us <= t + PACING_HYSTERESIS_US)
+            pick = 0;
+        // Safety net: never let frames pile up waiting for a due time that does not come (a
+        // full FIFO, or a frame held more than 3 periods): the newest is shown and the
+        // schedule starts again from the next frame.
+        if (g_ready_count > 0 && pick < 0 &&
+            (g_ready_count == READY_MAX || t - g_ready[0].decoded_us > 3 * g_pacing.period_us)) {
+            pick = g_ready_count - 1;
+            g_pacing.line_valid = false;
+            g_pacing.resyncs++;
         }
-        const Ready r = g_ready[0];
-        memmove(&g_ready[0], &g_ready[1], sizeof(Ready) * (READY_MAX - 1));
-        g_ready_count--;
+        if (pick >= 0 && g_pacing.last_decision_us && g_ready[pick].due_us <= g_pacing.last_decision_us &&
+            t - g_pacing.last_decision_us < 3 * g_pacing.period_us)
+            g_pacing.late++; // it was due at the previous decision but not converted yet
+        g_pacing.last_decision_us = t;
+    } else if (take && g_ready_count > 0) {
+        pick = g_ready_count - 1; // unpaced: the newest
+    }
+    if (pick >= 0) {
+        g_ready_trimmed += pick;
+        const Ready r = g_ready[pick];
+        memmove(&g_ready[0], &g_ready[pick + 1], sizeof(Ready) * (READY_MAX - pick - 1));
+        g_ready_count -= pick + 1;
         g_prev_displayed = g_displayed;
         g_displayed = r.set;
+        g_disp_valid = true;
         g_disp_ts = r.timestamp_ns;
         g_disp_decoded_us = r.decoded_us;
+        g_disp_received_us = r.received_us;
+        g_disp_picture_us = r.picture_us;
         g_disp_seq++;
     }
-    bool ok = g_stream_valid && g_displayed >= 0;
+    bool ok = g_stream_valid && g_disp_valid && g_displayed >= 0;
     if (ok) {
         out->eye[0] = &g_eye_tex[g_displayed][0];
         out->eye[1] = &g_eye_tex[g_displayed][1];
         out->timestamp_ns = g_disp_ts;
         out->decoded_us = g_disp_decoded_us;
+        out->received_us = g_disp_received_us;
+        out->picture_us = g_disp_picture_us;
         out->seq = g_disp_seq;
         out->waiting = g_ready_count;
     }
@@ -1354,12 +1701,66 @@ bool video_next(VideoFrame *out, bool take, int keep)
     return ok;
 }
 
-void video_pacing_stats(unsigned *overflow, unsigned *trimmed)
+void video_pacing_stats(VideoPacingStats *out)
 {
     pthread_mutex_lock(&g_pub_lock);
-    *overflow = g_ready_overflow;
-    *trimmed = g_ready_trimmed;
+    out->overflow = g_ready_overflow;
+    out->trimmed = g_ready_trimmed;
+    out->late = g_pacing.late;
+    out->margin_us = (unsigned)g_pacing.margin_us;
+    out->hold_us = (unsigned)g_pacing.hold_us;
+    out->resyncs = g_pacing.resyncs;
     pthread_mutex_unlock(&g_pub_lock);
+    pthread_mutex_lock(&g_dec_lock);
+    out->replaced = g_replaced;
+    pthread_mutex_unlock(&g_dec_lock);
+}
+
+void video_set_paused(bool paused)
+{
+    pthread_mutex_lock(&g_lock);
+    const bool changed = paused != g_paused;
+    g_paused = paused;
+    if (changed && !paused) {
+        // Frames were skipped: decoding restarts from a fresh IDR frame.
+        g_wait_idr = true;
+        g_want_idr = true;
+        g_last_idr_request_us = 0;
+    }
+    const unsigned epoch = changed ? ++g_epoch : g_epoch;
+    pthread_mutex_unlock(&g_lock);
+    if (!changed)
+        return;
+    // The pictures decoded before are stale: none is shown again.
+    pthread_mutex_lock(&g_pub_lock);
+    g_pub_epoch = epoch;
+    g_stream_valid = false;
+    g_disp_valid = false;
+    g_ready_count = 0;
+    g_pacing.line_valid = false;
+    pthread_mutex_unlock(&g_pub_lock);
+    LOG("video: %s", paused ? "paused (lobby), frames are no longer decoded" : "resumed, IDR frame requested");
+}
+
+void video_set_frame_period(uint32_t period_us)
+{
+    static uint32_t last; // called by the main loop at every iteration
+    if (period_us < 4000 || period_us > 40000 || period_us == last)
+        return;
+    last = period_us;
+    pthread_mutex_lock(&g_pub_lock);
+    g_pacing.period_us = period_us;
+    pthread_mutex_unlock(&g_pub_lock);
+    pthread_mutex_lock(&g_lock);
+    g_stream_period_us = period_us;
+    pthread_mutex_unlock(&g_lock);
+}
+
+void video_peek_stats(VideoStats *out)
+{
+    pthread_mutex_lock(&g_lock);
+    *out = g_stats;
+    pthread_mutex_unlock(&g_lock);
 }
 
 void video_get_stats(VideoStats *out)
@@ -1367,6 +1768,8 @@ void video_get_stats(VideoStats *out)
     pthread_mutex_lock(&g_lock);
     *out = g_stats;
     g_stats.queue_max = 0;
+    g_stats.arrival_gaps = g_stats.arrival_bunched = 0;
+    g_stats.arrival_gap_max_us = 0;
     pthread_mutex_unlock(&g_lock);
 }
 

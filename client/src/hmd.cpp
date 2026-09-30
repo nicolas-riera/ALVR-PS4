@@ -92,6 +92,14 @@ bool hmd_open(int user_id, HmdState *st)
     rc = p_get_field_of_view(st->handle, &st->fov);
     LOG("sceHmdGetFieldOfView -> 0x%08x  tan out=%.4f in=%.4f top=%.4f bottom=%.4f", (unsigned)rc,
         st->fov.tan_out, st->fov.tan_in, st->fov.tan_top, st->fov.tan_bottom);
+    if (rc < 0 || st->fov.tan_out + st->fov.tan_in <= 0.0f || st->fov.tan_top + st->fov.tan_bottom <= 0.0f) {
+        // The values every PSVR reported so far: a zero field of view would divide by zero
+        // in the lobby and be sent to the streamer.
+        st->fov.tan_out = 1.2074f;
+        st->fov.tan_in = 1.1813f;
+        st->fov.tan_top = st->fov.tan_bottom = 1.2629f;
+        LOG("sceHmdGetFieldOfView failed: the usual PSVR field of view is used");
+    }
     return true;
 }
 

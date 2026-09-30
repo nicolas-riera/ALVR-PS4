@@ -114,6 +114,7 @@ static void *alloc_direct(size_t size, size_t align, int mem_type, const char *w
     rc = sceKernelMapDirectMemory(&ptr, size, 0x33, 0, phys, align);
     if (rc < 0) {
         LOG("reproj: map %s failed 0x%08x", what, (unsigned)rc);
+        sceKernelReleaseDirectMemory(phys, size);
         return nullptr;
     }
     memset(ptr, 0, size);

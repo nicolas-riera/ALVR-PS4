@@ -93,7 +93,7 @@ struct BinReader {
     const uint8_t *blob(uint64_t *out_len)
     {
         uint64_t n = u64();
-        if (error || pos + n > len) {
+        if (error || n > len - pos) { // pos <= len: no overflow with a huge n
             error = true;
             *out_len = 0;
             return nullptr;
