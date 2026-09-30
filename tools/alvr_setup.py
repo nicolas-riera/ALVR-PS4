@@ -1,6 +1,6 @@
 """Configure the ALVR 20.14.1 streamer (PC side) for the PS4 client.
 
-Applies every setting the PS4 client needs (see README.md, "ALVR streamer settings"):
+Applies every setting the PS4 client needs (see docs/manual-setup.md):
   - video: H.264 (the PS4 decodes H.264 only), 60 fps preferred (the client only offers
     60 Hz), foveated encoding on with PSVR settings: the center half of each eye keeps the
     full resolution and the edges are squeezed 2:1, so at the client's default 130%
