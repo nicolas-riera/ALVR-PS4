@@ -48,6 +48,49 @@ Contents:
 - Output is linear NV12; converting it to RGB on the CPU with SSE takes about 4 ms per
   1920×1056 frame over four threads.
 
+### The whole pipeline
+
+How one frame travels in this project, from the head motion the camera sees to the photons
+on the PSVR panel, with the times measured at 90 Hz in Beat Saber (about 60 ms from head
+motion to photons in all). Solid arrows carry the poses and the video; dotted arrows show
+the compositor's own head tracking and the request for a new IDR frame when one is lost.
+
+```mermaid
+flowchart LR
+    subgraph TRK["PS4 tracking"]
+        tracker["VR tracker<br/>PS Camera 60 Hz + IMUs"]
+    end
+
+    subgraph PC["PC: SteamVR + ALVR streamer 20.14.1"]
+        game["Game renders both eyes<br/>with the head pose received"]
+        fov["Foveated encoding<br/>2496×1408 → 1920×1056"]
+        enc["NVENC H.264<br/>CAVLC, CBR 80 Mbps<br/>no B-frames"]
+        game --> fov --> enc
+    end
+
+    subgraph PS4["PS4 client"]
+        net["Network thread<br/>reassembles frames"]
+        queue["Decode queue<br/>12 slots"]
+        dec["libSceVideodec2<br/>software: CPU + GPU<br/>depth 3 at 90 fps<br/>~20-25 ms"]
+        conv["NV12 → BGRA<br/>4 threads, foveated<br/>edges expanded, ~4 ms"]
+        ready["Ready frames<br/>due time = PC clock<br/>+ jitter margin"]
+        pick["Before each<br/>compositor pass:<br/>newest due frame,<br/>1.5 ms hysteresis"]
+        net --> queue --> dec --> conv --> ready --> pick
+    end
+
+    subgraph SYS["PS4 system"]
+        comp["Compositor<br/>libSceHmd reprojection<br/>warp + lens distortion"]
+        panel["PSVR panel<br/>1920×1080<br/>90 / 120 Hz"]
+        comp -->|"~4 ms"| panel
+    end
+
+    tracker -->|"head + controller poses<br/>head position predicted"| game
+    enc ==>|"UDP, port 9944"| net
+    pick ==>|"frame + its render pose"| comp
+    tracker -.->|"latest head rotation"| comp
+    dec -.->|"frame lost: request IDR"| enc
+```
+
 ## 2. Inside the system decoder
 
 libSceVideodec2 is a thin front end. The work is done by a core library, libSceVdecCore,
