@@ -16,7 +16,8 @@ Releases page) and accept the administrator prompt. It:
    `driver_alvr_server.dll.orig`), and adds PSVR and PS Move status icons for SteamVR
    (`resources\icons`);
 4. installs [VB-Audio Virtual Cable](https://vb-audio.com/Cable/) for the microphone,
-   unless Virtual Audio Cable or VB-Cable is already installed;
+   unless Virtual Audio Cable or VB-Cable is already installed (even turned off: a cable
+   turned off keeps ALVR's microphone off, and the setup says how to turn it back on);
 5. writes the PS4 settings (see [the settings table](manual-setup.md#by-hand-in-the-dashboard-settings-tab))
    into ALVR's `session.json`, after backing up any existing one (a PS4 already trusted
    stays trusted);
@@ -66,9 +67,10 @@ the normal mode back as well.
 ## Recommended: disable unused SteamVR add-ons
 
 When the PS4 connects, the ALVR driver gives SteamVR only 1 second to activate each
-controller. If SteamVR is still loading other drivers, the activation times out and the
-controller stays greyed out ("standby") for the whole session. The PS4 client already
-waits 6 seconds after SteamVR starts before it connects. Disabling the drivers you do not
-use with ALVR makes this more reliable, and SteamVR also starts faster. To do so, open
+controller. If SteamVR is still loading other drivers, the activation times out. The PS4
+client waits 6 seconds after SteamVR starts before it connects, and the
+[driver patch](manual-setup.md#driver-patches) keeps a controller that SteamVR activates
+late, so this rarely matters any more. Disabling the drivers you do not use with ALVR still
+makes SteamVR start faster and leaves less to go wrong. To do so, open
 SteamVR → Settings → Startup / Shutdown → **Manage Add-ons**, then turn off Steam Link
 (vrlink), Oculus, OculusTouchLink, SlimeVR, Amethyst, PSMoveServiceEx and similar add-ons.

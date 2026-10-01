@@ -51,7 +51,8 @@ position" screen opens, once per launch.
 ## Lobby settings
 
 In the lobby, a short press on **START** (PS Move) or **OPTIONS** (DualShock 4) opens the
-settings in front of you. Point at a button with a Move and pull the trigger, or with the
+settings in front of you (the information panel says which, for the controllers that are
+on). Point at a button with a Move and pull the trigger, or with the
 DualShock 4 (the laser comes out of its light bar) and press **✕**. Settings: your height
 (places the floor), headset prediction, controller prediction, stream resolution and
 refresh rate (both marked "restart required", in orange once changed), centring on the
@@ -115,8 +116,8 @@ second. 60 Hz runs the PSVR at 120 Hz with each frame shown twice by the system,
 PSVR games do; use it if 90 Hz is not smooth, typically in a game the PC cannot run at 90
 fps (the performance overlay's frame rate stays below 90, with many Repeats): at 90 Hz some
 frames are then shown twice and others once, at 60 Hz every frame is shown exactly twice.
-The decoder also holds frames for less time at 60 Hz. With 60 Hz, the ALVR dashboard warns that the
-preferred FPS (90) is not supported and uses 60: that is expected.
+The decoder also holds frames for less time at 60 Hz. With 60 Hz, the ALVR dashboard warns
+that the preferred FPS (90) is not supported and uses 60: that is expected.
 
 ## DualShock 4 in the lobby
 

@@ -3,7 +3,8 @@
 This document specifies the network protocol spoken by the ALVR **streamer** v20.14.1 (Windows,
 SteamVR driver) so that a C/C++ client can interoperate with it without reading the Rust sources.
 
-All paths are relative to the repository root `reference/alvr-20.14.1/`.
+All paths are relative to the root of the ALVR v20.14.1 source tree
+(<https://github.com/alvr-org/ALVR/tree/v20.14.1>).
 
 Conventions used below:
 
@@ -754,7 +755,8 @@ prefixes.
   `m_viewportL/m_viewportR`). The encoder may pad to macroblock size (cropping in SPS).
 * If `enable_foveated_encoding` is true the image is foveation-compressed and must be
   decompressed by the client (shader in `alvr/graphics`); avoid by reporting
-  `supports_foveated_encoding: false`.
+  `supports_foveated_encoding: false`. This client implements the decompression (since
+  v0.9.3, `client/src/foveation.cpp`) and reports `true`.
 * Server-side: frames are dropped until the first IDR when `avoid_video_glitching` is enabled; if
   its send queue is full it drops the frame and schedules an IDR.
 

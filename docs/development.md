@@ -35,13 +35,16 @@ python tools/log_receiver.py               # prints the PS4 logs and saves them 
 The stable build sends no logs.
 
 While streaming, a `video:` line every 5 seconds sums up the stream: frames received,
-decoded and dropped, decode and conversion times, latency (`m2p`), and the frame pacing:
-`repeat` (display frames with no new frame), `skip` (frames never shown), `late` (frames
-that came after the decision point they were due at), `margin` (the jitter margin frames
-wait for), `decode` (received to decoder picture), `wait` (picture to submission), `lead`
-(how long before a compositor pass the frame is submitted) and `misses` (submissions that
-came after the pass), and
-`arrival` (gaps in the frames received from the PC, frames bunched together, longest gap).
+decoded, dropped and lost, the decoder call and conversion times, the input queue, latency
+(`m2p`), the headset prediction, and the frame pacing: `repeat` (display frames with no new
+frame), `skip` (frames never shown), `late` (frames that came after the decision point they
+were due at), `margin` (the jitter margin frames wait for), `hold` (how long the last frame
+waited after its conversion), `resync` (safety net used; should stay 0), `decode` (received
+to decoder picture), `wait` (picture to submission), `lead` (how long before a compositor
+pass the frame is submitted) and `misses` (submissions that came after the pass); then
+`arrival` (gaps in the frames received from the PC, frames bunched together, longest gap)
+and `pose` (frames whose tracking pose was not found, went back in time, or was unusually
+old). How the decoder and the pacing work: [PS4 video decoder](ps4-video-decoder.md).
 
 ## Release
 
@@ -70,13 +73,16 @@ timings. `--list` shows the test plans; the script's header describes every opti
 | `client/src/video.*` | H.264 decoding (libSceVideodec2, the system decoder: CPU + GPU compute), paced display, NV12 → RGB |
 | `client/src/foveation.*` | foveated encoding math (expansion of the squeezed eye edges), same as the official client |
 | `client/src/audio.*` | game audio playback (libSceAudioOut) and microphone capture (libSceAudioIn) |
-| `client/src/hmd.*`, `reproj.*`, `screen.*` | PSVR (libSceHmd) and the system reprojection |
+| `client/src/hmd.*`, `reproj.*`, `screen.*` | PSVR (libSceHmd), the system reprojection compositor, video output and VR display mode |
+| `client/src/hmd_setup.*` | system dialogs: "connect your PlayStation VR" and "confirm your position" |
 | `client/src/tracker.*`, `camera.*`, `move.*`, `wand.*`, `pad.*`, `hid.*` | camera tracking (libSceVrTracker), PS Move, Vive wand emulation, DualShock 4, raw HID reports |
 | `client/src/config.*` | settings stored in the PS4 save data (libSceSaveData) |
 | `client/src/settings.*` | lobby settings panel, first launch height panel and height calibration |
 | `client/src/lobby.*` | software-rendered lobby |
 | `client/src/bench.*` | video bench server (Dev build) |
+| `client/src/log.*`, `bincode.*`, `vrmath.h`, `font_data.h`, `stroke_font.h` | UDP logs (Dev build), ALVR's binary serialization, quaternion helpers, the TV status font and the lobby's stroke font |
 | `docs/alvr-20.14.1-protocol.md` | the ALVR 20.14.1 wire protocol, as implemented |
+| `docs/psvr-technical-reference.md`, `docs/ps4-video-decoder.md` | technical references: the PSVR and the PS4's VR system; the PS4 video decoder |
 | `tools/alvr_setup.py` | PC-side ALVR settings for this client |
 | `tools/alvr_driver_patch.py` | ALVR 20.14.1 driver patches: menu is not system, headset and controllers "searching", late controller activation |
 | `pc-setup/` | sources of the one-file PC setup (`setup.ps1`, settings template, SteamVR icons) |
@@ -86,6 +92,8 @@ timings. `--list` shows the test plans; the script's header describes every opti
 | `tools/re/` | reverse-engineering helpers (headless Ghidra on dumped system modules) |
 | `tools/test/` | host-side tests: ALVR path hash, lobby preview rendered to an image |
 | `tools/video_bench.py` | video bench (see above) |
+| `tools/build.sh`, `tools/deploy.py`, `tools/log_receiver.py` | build in WSL, upload over FTP, receive the Dev build's logs |
+| `tools/fontgen/` | generators of the two fonts |
 
 ## Saved settings
 

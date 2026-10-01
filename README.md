@@ -30,6 +30,8 @@ normal mode.
 | [Troubleshooting](docs/troubleshooting.md) | common problems and their fixes |
 | [Development](docs/development.md) | building, deploying, logs, the source layout, the saved settings |
 | [ALVR 20.14.1 protocol](docs/alvr-20.14.1-protocol.md) | the wire protocol, as implemented by the client |
+| [PS VR technical reference](docs/psvr-technical-reference.md) | everything learned about the PSVR and the PS4's VR system: headset, compositor, VR display mode, tracker, PS Move, DualShock 4, dialogs, decoder |
+| [PS4 video decoder](docs/ps4-video-decoder.md) | the system video decoder in depth: API, internals, pipeline depth, measurements, colour conversion and paced display |
 
 ## Requirements
 
@@ -45,11 +47,11 @@ between versions, so any other streamer version may not connect.
 
 ## 1. Install the app on the PS4
 
-Both files come from the project's **Releases** page: `ALVR-PS4-v0.10.x.pkg` for the PS4 and
+Both files come from the project's **Releases** page: `ALVR-PS4-v0.11.x.pkg` for the PS4 and
 `ALVR-PS4-Setup.bat` for the PC.
 
 1. Start GoldHEN on the PS4.
-2. Copy `ALVR-PS4-v0.10.x.pkg` to the console, either to a USB drive or over GoldHEN's FTP
+2. Copy `ALVR-PS4-v0.11.x.pkg` to the console, either to a USB drive or over GoldHEN's FTP
    server (port 2121, to `/data/pkg/`).
 3. In GoldHEN, open **Package Installer** and install the package. The app **ALVR PS4**
    appears on the home screen.
@@ -74,7 +76,8 @@ everything up by hand instead, see [Manual setup](docs/manual-setup.md).
    grid with your Moves, your DualShock 4 and the camera. An information panel in front of
    you shows the PS4's IP address, its ALVR hostname (for example `5026.client`) and the
    connection state. The first time, a panel asks for your height: stand straight, set it
-   with − / +, then Confirm (the PC is searched for after that).
+   with − / + (or measure it with **Calibrate**), then Confirm (the PC is searched for after
+   that).
 4. On the PC, start the ALVR dashboard. The PS4 appears under **Devices** with its
    hostname. Click **Trust**. If it does not appear, add it by hand with the PS4 IP address
    shown in the lobby.
@@ -93,3 +96,9 @@ The controls and the lobby settings are described in [Usage](docs/usage.md).
 The PSVR status icons in SteamVR are drawn by [leonmc330](https://github.com/leonmc330/).
 The PS Move status icon is drawn after the one of
 [PSMoveSteamVRBridge](https://github.com/HipsterSloth/PSMoveSteamVRBridge) (Apache License 2.0).
+
+## License
+
+[MIT](LICENSE). The foveated encoding math in `client/src/foveation.cpp` is ported from
+[ALVR](https://github.com/alvr-org/ALVR) (MIT License); see [LICENSE](LICENSE) for the
+third-party notices.
