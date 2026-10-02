@@ -296,7 +296,9 @@ function Switch-TrackerMode {
 # disable of the endpoint or of the driver device does not work: it did nothing, or failed.
 # An endpoint marked disabled whose driver is no longer loaded (DeviceState 0x10000004, seen
 # with Virtual Audio Cable turned off by other means) still counts as a cable turned off:
-# the setup must not install another cable over it.
+# the setup must not install another cable over it. Its driver device must still be there
+# (disabled in Device Manager): uninstalling a cable leaves its endpoints in the registry
+# with the same state, and those are ignored.
 $CableDescs = @("VB-Audio Virtual Cable", "Virtual Audio Cable")
 $MMDevices = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio"
 
@@ -312,6 +314,11 @@ function Get-AudioCables {
             $props = Get-ItemProperty (Join-Path $k.PSPath "Properties") -ErrorAction SilentlyContinue
             $desc = $props.'{b3f8fa53-0004-438e-9003-51a46e139bfc},6'
             if ($CableDescs -notcontains $desc) { continue }
+            if (-not $present) {
+                # "{1}.ROOT\..." holds the driver device's instance id.
+                $dev = "$($props.'{b3f8fa53-0004-438e-9003-51a46e139bfc},2')" -replace '^\{\d+\}\.', ''
+                if (-not $dev -or -not (Get-PnpDevice -InstanceId $dev -ErrorAction SilentlyContinue | Where-Object { $_.Present })) { continue }
+            }
             $list += [pscustomobject]@{
                 Id = "{0.0.$($flow[1]).00000000}.$($k.PSChildName)"
                 Name = "$($props.'{a45c254e-df1c-4efd-8020-67d146a850e0},2') ($desc, $(if ($flow[1] -eq '0') { 'speaker' } else { 'microphone' }))"
