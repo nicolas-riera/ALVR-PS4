@@ -6,7 +6,9 @@
 //                                             4 first launch wizard, 5 close-up of the DualShock 4,
 //                                             6 height calibration (from the settings), 7 the same from the wizard,
 //                                             8 settings scrolled to the bottom, 9 surface test (build with
-//                                             -DALVR_PS4_DEV=1), 10 headset tracking not started (camera only)
+//                                             -DALVR_PS4_DEV=1), 10 headset tracking not started (camera only),
+//                                             11 Tracking Viewer's headset model, turned by yaw
+//                                             (argv[4]: pitch, radians)
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -210,6 +212,27 @@ int main(int argc, char **argv)
         v.beacon = true;
         v.beacon_pos = head + v3(0, 0, -1.8f);
         v.beacon_rgb = 0xff4040;
+    }
+    if (mode == 11) { // Tracking Viewer's headset model alone, 1.5 m ahead through a narrow lens (little
+                      // perspective), turned by yaw, then tilted by the pitch in argv[4] (radians)
+        const float pitch = argc > 4 ? atof(argv[4]) : 0.0f;
+        for (int eye = 0; eye < 2; eye++) {
+            v.eye_pos[eye] = head;
+            v.eye_rot[eye] = Quat{0, 0, 0, 1};
+            v.fov[eye] = EyeFov{0.12f, 0.12f, 0.135f, 0.135f};
+        }
+        memset(v.controllers, 0, sizeof(v.controllers));
+        memset(v.pads, 0, sizeof(v.pads));
+        v.info[0] = nullptr;
+        v.grid_visible = false;
+        v.headset.visible = true;
+        v.headset.tracked = true;
+        v.headset.pos = head + v3(0, 0, -1.5f);
+        const Quat qy{0, sinf(yaw / 2), 0, cosf(yaw / 2)}, qp{sinf(pitch / 2), 0, 0, cosf(pitch / 2)};
+        v.headset.rot = Quat{qp.w * qy.x + qp.x * qy.w + qp.y * qy.z - qp.z * qy.y,
+                             qp.w * qy.y - qp.x * qy.z + qp.y * qy.w + qp.z * qy.x,
+                             qp.w * qy.z + qp.x * qy.y - qp.y * qy.x + qp.z * qy.w,
+                             qp.w * qy.w - qp.x * qy.x - qp.y * qy.y - qp.z * qy.z};
     }
     lobby_render(px, W, H, W, &v);
     FILE *f = fopen(argc > 1 ? argv[1] : "lobby.ppm", "wb");

@@ -26,7 +26,7 @@ normal mode.
 | --- | --- |
 | [PC setup](docs/pc-setup.md) | what the setup .bat does, the audio cable toggle, tracker mode, SteamVR add-ons |
 | [Manual setup](docs/manual-setup.md) | setting ALVR up by hand: microphone, every dashboard setting, the driver patches |
-| [Usage](docs/usage.md) | PS Move controls, lobby settings, refresh rate, DualShock 4 |
+| [Usage](docs/usage.md) | PS Move controls, lobby settings, refresh rate, DualShock 4, Tracking Viewer on the PC |
 | [Troubleshooting](docs/troubleshooting.md) | common problems and their fixes |
 | [Development](docs/development.md) | building, deploying, logs, the source layout, the saved settings |
 | [ALVR 20.14.1 protocol](docs/alvr-20.14.1-protocol.md) | the wire protocol, as implemented by the client |
@@ -62,7 +62,8 @@ Install SteamVR from Steam first. Then double-click **`ALVR-PS4-Setup.bat`** (fr
 Releases page) and accept the administrator prompt. It downloads ALVR streamer 20.14.1 into
 `ALVR-PS4_PC-Streamer\` next to the .bat, patches and configures it for the PS4, installs a
 virtual audio cable for the microphone, opens the firewall ports and creates an
-"ALVR (PS4)" desktop shortcut. It is safe to run again.
+"ALVR (PS4)" desktop shortcut. It also puts ALVR PS4 Tracking Viewer (a window showing what
+the PS4 tracks) in that folder. It is safe to run again.
 
 Details, and the extra tools it installs, are in [PC setup](docs/pc-setup.md). To set
 everything up by hand instead, see [Manual setup](docs/manual-setup.md).

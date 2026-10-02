@@ -1,0 +1,81 @@
+#include <windows.h>
+#include "resource.h"
+
+CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "trackview.manifest"
+IDI_APP ICON "trackview.ico"
+
+IDD_IP DIALOGEX 0, 0, 230, 74
+STYLE DS_MODALFRAME | DS_CENTER | DS_SHELLFONT | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "ALVR PS4 Tracking Viewer"
+FONT 9, "Segoe UI"
+BEGIN
+    LTEXT "PS4 IP address (shown in the ALVR PS4 lobby):", -1, 8, 8, 214, 10
+    EDITTEXT IDC_IP, 8, 22, 214, 14, ES_AUTOHSCROLL
+    DEFPUSHBUTTON "Connect", IDOK, 118, 50, 50, 14
+    PUSHBUTTON "Cancel", IDCANCEL, 172, 50, 50, 14
+END
+
+IDM_MAIN MENU
+BEGIN
+    POPUP "&Console"
+    BEGIN
+        MENUITEM "&Change IP address...\tF2", IDM_CHANGE_IP
+        MENUITEM SEPARATOR
+        MENUITEM "E&xit", IDM_EXIT
+    END
+    POPUP "&Recording"
+    BEGIN
+        MENUITEM "&Record / stop\tCtrl+R", IDM_RECORD
+        MENUITEM "&Play / pause\tSpace", IDM_PLAY
+        MENUITEM "&Back to live\tL", IDM_LIVE
+        MENUITEM SEPARATOR
+        MENUITEM "5 s b&ack\tLeft", IDM_BACK
+        MENUITEM "5 s &forward\tRight", IDM_FORWARD
+        MENUITEM "To the &start\tHome", IDM_START
+        MENUITEM SEPARATOR
+        MENUITEM "&Load...\tCtrl+O", IDM_LOAD
+        MENUITEM "&Save...\tCtrl+S", IDM_SAVE
+    END
+    POPUP "&View"
+    BEGIN
+        MENUITEM "&Reset camera\tR", IDM_RESET_VIEW
+        MENUITEM "&Controls...", IDM_CONTROLS
+    END
+END
+
+IDA_MAIN ACCELERATORS
+BEGIN
+    "R", IDM_RECORD, VIRTKEY, CONTROL
+    "O", IDM_LOAD, VIRTKEY, CONTROL
+    "S", IDM_SAVE, VIRTKEY, CONTROL
+    VK_SPACE, IDM_PLAY, VIRTKEY
+    "L", IDM_LIVE, VIRTKEY
+    VK_LEFT, IDM_BACK, VIRTKEY
+    VK_RIGHT, IDM_FORWARD, VIRTKEY
+    VK_HOME, IDM_START, VIRTKEY
+    "R", IDM_RESET_VIEW, VIRTKEY
+    VK_F2, IDM_CHANGE_IP, VIRTKEY
+END
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION 1, 0, 0, 0
+PRODUCTVERSION 1, 0, 0, 0
+FILEOS VOS_NT_WINDOWS32
+FILETYPE VFT_APP
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "FileDescription", "ALVR PS4 Tracking Viewer"
+            VALUE "FileVersion", "1.0.0"
+            VALUE "ProductName", "ALVR PS4"
+            VALUE "ProductVersion", "1.0.0"
+            VALUE "OriginalFilename", "ALVR PS4 Tracking Viewer.exe"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

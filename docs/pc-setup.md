@@ -23,8 +23,10 @@ Releases page) and accept the administrator prompt. It:
    stays trusted);
 6. opens the ALVR ports (9943-9944, UDP and TCP) in the Windows firewall;
 7. registers the driver with SteamVR (and unregisters any other ALVR version, which would
-   fight over the headset), creates an "ALVR (PS4)" desktop shortcut and starts the
-   dashboard (as your user, not as administrator).
+   fight over the headset);
+8. puts [ALVR PS4 Tracking Viewer](usage.md#tracking-viewer-on-the-pc) in
+   `ALVR-PS4_PC-Streamer\` (no shortcut: start it from there), creates the "ALVR (PS4)"
+   desktop shortcut and starts the dashboard (as your user, not as administrator).
 
 It is safe to run again. To install into another folder, run it from a command prompt:
 `ALVR-PS4-Setup.bat D:\VR`. To start over from scratch, run

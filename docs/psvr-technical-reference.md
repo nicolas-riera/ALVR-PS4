@@ -188,8 +188,12 @@ int sceHmdGetDeviceInformationByHandle(int32_t handle, HmdDeviceInformation *inf
 ```
 
 `sceHmdGetDeviceInformation` works before the headset is opened: it is how an app waits for
-the headset. `hmu_mount` was seen at 0 and 1 between launches (**observed**); it may tell
-whether the headset is worn, which was not confirmed.
+the headset. `hmu_mount` is the headset's proximity sensor: it went to 0 each time the
+headset was taken off and back to 1 when it was put on again, within a second, the rest of
+the structure unchanged (**measured** on 2026-10-02 with the Dev build's logs). libSceHmd
+reads it from the device on every call (no cache), so it can be polled; this project polls
+it a few times per second, logs every change of the whole structure, and treats it as the
+worn sensor once it has been 1 during the launch.
 
 ### Opening and the field of view
 
@@ -1068,10 +1072,13 @@ compositor accepts any texture size, as long as the per-eye block
   height measured once should stay valid. In practice it seems to move by a few
   centimetres after each tracking reset (recalibration, coming back from the PS menu). It is
   not settled whether the tracker's origin shifts slightly at each recalibration (the
-  camera's own orientation estimate changing) or whether something else is at play.
+  camera's own orientation estimate changing) or whether something else is at play. On
+  2026-10-02, standing still through three resets in a row, the neck height the tracker
+  reported moved by -9.8, +3.4 and +9.4 cm (**measured**): the app now re-anchors the floor
+  on it, which is exact where the user stood; a tilt estimate off by a degree still moves
+  the floor by about 2 cm per metre elsewhere in the room.
 - The meaning of the compositor's `mode_a`, `mode_b`, `type`, `mode` and `flags` values,
   and of the `unk28` / `unk30` fields of its pose.
-- `hmu_mount` in the device information (worn detection?).
 - The VR service dialog's modes 1 and 2.
 - The DualShock 4 battery byte in the HID state, and why `sceMoveGetDeviceInfo` never
   returned the sphere radius.

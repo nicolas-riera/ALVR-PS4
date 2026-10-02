@@ -13,6 +13,25 @@ wsl -d Debian -- bash tools/build.sh VARIANT=stable   # stable build: client/IV0
 python tools/deploy.py [--stable] [ps4_ip] [port]     # uploads the Dev (or stable) pkg over GoldHEN FTP to /data/pkg/
 ```
 
+ALVR PS4 Tracking Viewer (the PC companion in `companion/`, see [Usage](usage.md#tracking-viewer-on-the-pc))
+is a Win32 program built with MinGW-w64, also in WSL (`sudo apt install g++-mingw-w64-x86-64`):
+
+```
+wsl -d Debian -- bash tools/build_companion.sh       # companion/build/ALVR PS4 Tracking Viewer.exe (static, portable)
+```
+
+It draws with the lobby's renderer (`client/src/lobby.cpp`, compiled in) and shares the
+wire format with the app (`client/src/trackview_proto.h`): it sends a hello to UDP port
+9955 on the console every second, and the app answers with the tracked devices at up to
+60 Hz while the hellos keep coming (`client/src/trackview.cpp`). Its icon comes from
+`tools/logo/make_trackview_icon.py`. The setup .bat installs it:
+`tools/make_release.py` embeds the built .exe (gzip + base64, about 280 KB of the .bat), so
+build it before making a release. Its headset model is drawn by
+`client/src/lobby.cpp` (`draw_headset`); `tools/test/lobby_preview.cpp` mode 11 renders it
+alone through a narrow lens, for comparing with photos of the PS VR. A `.psvrdata` recording is `PSVRDATA`, then four
+u32 (file format version 1, wire version, frame count, duration in ms), then for each frame
+a u32 time in ms, a u16 size and the state packet as it came from the console.
+
 `tools/build.sh` expects the toolchain in `~/ps4/OpenOrbis/PS4Toolchain` and a local
 OpenSSL 1.1 in `~/ps4/libssl11` (PkgTool needs it; Debian 13 no longer ships it).
 
@@ -87,13 +106,14 @@ timings. `--list` shows the test plans; the script's header describes every opti
 | `tools/alvr_driver_patch.py` | ALVR 20.14.1 driver patches: menu is not system, headset and controllers "searching", late controller activation |
 | `pc-setup/` | sources of the one-file PC setup (`setup.ps1`, settings template, SteamVR icons) |
 | `tools/icons/make_icons.py` | draws the PSVR and PS Move SteamVR status icons (`pc-setup/icons`) |
-| `tools/logo/` | app icons (stable, DEV and save data icons) |
+| `tools/logo/` | app icons (stable, DEV, save data and Tracking Viewer icons) |
 | `tools/make_release.py` | builds `release/` (`ALVR-PS4-v<version>.pkg`, `ALVR-PS4-Setup.bat`) for the GitHub release |
 | `tools/re/` | reverse-engineering helpers (headless Ghidra on dumped system modules) |
 | `tools/test/` | host-side tests: ALVR path hash, lobby preview rendered to an image |
 | `tools/video_bench.py` | video bench (see above) |
 | `tools/build.sh`, `tools/deploy.py`, `tools/log_receiver.py` | build in WSL, upload over FTP, receive the Dev build's logs |
 | `tools/fontgen/` | generators of the two fonts |
+| `companion/`, `tools/build_companion.sh` | ALVR PS4 Tracking Viewer, the PC window showing what the PS4 tracks |
 
 ## Saved settings
 

@@ -24,7 +24,7 @@ static const uint64_t SAVE_DELAY_US = 2000000; // config written 2 s after the l
 
 enum Button { BTN_NONE = -1, BTN_HEIGHT_MINUS, BTN_HEIGHT_PLUS, BTN_HPRED_MINUS, BTN_HPRED_PLUS, BTN_PRED_MINUS,
               BTN_PRED_PLUS, BTN_RES_MINUS, BTN_RES_PLUS, BTN_RATE, BTN_CENTER, BTN_CLOSE, BTN_RESET, BTN_CONFIRM,
-              BTN_CALIBRATE, BTN_CANCEL, BTN_VIBRATION, BTN_HUD, BTN_SURFACE, BTN_COUNT };
+              BTN_CALIBRATE, BTN_CANCEL, BTN_VIBRATION, BTN_HUD, BTN_SURFACE, BTN_LOBBY, BTN_TRACKING, BTN_COUNT };
 
 struct Rect {
     float x0, y0, x1, y1;
@@ -37,7 +37,8 @@ static const float ROW_TITLE = 0.255f, ROW_ACTIONS = -0.470f;
 static const float VIEW_TOP = 0.215f, VIEW_BOTTOM = -0.415f;
 static const float ROW_USER = 0.165f, ROW_CAMERA = 0.095f, ROW_TIP = 0.045f, ROW_HPRED = -0.035f,
                    ROW_PRED = -0.115f, ROW_RES = -0.195f, ROW_RATE = -0.275f, ROW_CENTER = -0.355f,
-                   ROW_VIBRATION = -0.435f, ROW_HUD = -0.515f, ROW_RESET = -0.605f;
+                   ROW_VIBRATION = -0.435f, ROW_HUD = -0.515f, ROW_LOBBY = -0.595f, ROW_TRACKING = -0.675f,
+                   ROW_RESET = -0.765f;
 static const float CONTENT_BOTTOM = ROW_RESET - 0.05f;
 static const float SCROLL_MAX = VIEW_BOTTOM - CONTENT_BOTTOM;
 static const float SCROLL_STICK_M_PER_S = 0.6f; // DualShock 4 right stick fully pushed
@@ -147,6 +148,8 @@ static float button_row(int b)
     case BTN_CENTER: return ROW_CENTER;
     case BTN_VIBRATION: return ROW_VIBRATION;
     case BTN_HUD: return ROW_HUD;
+    case BTN_LOBBY: return ROW_LOBBY;
+    case BTN_TRACKING: return ROW_TRACKING;
     case BTN_RESET: return ROW_RESET;
     }
     return 0.0f;
@@ -225,7 +228,9 @@ static Rect button_rect(int b)
     case BTN_CALIBRATE:
     case BTN_RATE:
     case BTN_CENTER:
-    case BTN_HUD: return wide(row);
+    case BTN_HUD:
+    case BTN_LOBBY:
+    case BTN_TRACKING: return wide(row);
     case BTN_VIBRATION: return Rect{SLIDER_X0 - 0.015f, row - BTN_H / 2, BAR_GRAB_X0 - 0.001f, row + BTN_H / 2};
     case BTN_RESET: return Rect{-0.19f, row - 0.03f, 0.19f, row + 0.03f};
     }
@@ -245,9 +250,10 @@ static void save_now(const ClientConfig *cfg)
     config_store(cfg);
     g.dirty = false;
     LOG("settings: saved (user height %d cm, camera height %d cm, headset prediction %d%%, controller prediction %d ms, "
-        "resolution %d%%, %d Hz, center on SteamVR start %d, vibration %d%%, overlay %d)",
+        "resolution %d%%, %d Hz, center on SteamVR start %d, vibration %d%%, overlay %d, settings in the lobby %d)",
         cfg->user_height_cm, cfg->camera_height_cm, cfg->head_prediction_percent, cfg->controller_prediction_ms,
-        cfg->resolution_percent, cfg->refresh_rate, cfg->center_on_connect, cfg->vibration_percent, cfg->hud);
+        cfg->resolution_percent, cfg->refresh_rate, cfg->center_on_connect, cfg->vibration_percent, cfg->hud,
+        cfg->lobby_settings);
 }
 
 static ClientConfig *g_cfg; // last config seen, to save on close
@@ -358,6 +364,7 @@ static unsigned apply(int b, const SettingsContext &ctx, uint64_t now)
         c->refresh_rate = 90;
         c->vibration_percent = 100;
         c->hud = 0;
+        c->lobby_settings = 1;
         LOG("settings: reset to defaults");
         return SETTINGS_RESET;
     case BTN_HEIGHT_MINUS:
@@ -405,6 +412,12 @@ static unsigned apply(int b, const SettingsContext &ctx, uint64_t now)
     case BTN_HUD:
         c->hud = !c->hud;
         return 0;
+    case BTN_LOBBY:
+        c->lobby_settings = !c->lobby_settings;
+        return 0;
+    case BTN_TRACKING:
+        LOG("settings: reset tracking");
+        return SETTINGS_RESET_TRACKING;
     case BTN_RATE:
         c->refresh_rate = c->refresh_rate == 90 ? 60 : 90;
         return 0;
@@ -764,7 +777,7 @@ unsigned settings_update(const SettingsContext &ctx, const SettingsRay rays[LOBB
         c->controller_prediction_ms != before.controller_prediction_ms ||
         c->resolution_percent != before.resolution_percent || c->center_on_connect != before.center_on_connect ||
         c->refresh_rate != before.refresh_rate || c->vibration_percent != before.vibration_percent ||
-        c->hud != before.hud) {
+        c->hud != before.hud || c->lobby_settings != before.lobby_settings) {
         g.dirty = true;
         g.last_change_us = now;
     }
@@ -1004,6 +1017,9 @@ void settings_build(LobbyPanel *panel, LobbyPointer pointers[LOBBY_POINTERS])
         row_text(panel, lx0, vx0, ROW_VIBRATION, "Vibration", LABEL_H, -1, 0xc0c8d0);
         row_text(panel, vx0 - 0.02f, SLIDER_X0 - 0.02f, ROW_VIBRATION, g.vibration, LABEL_H, -1, 0xffffff);
         row_text(panel, lx0, MINUS_X - 0.01f, ROW_HUD, "Performance overlay (in the stream)", LABEL_H, -1, 0xc0c8d0);
+        row_text(panel, lx0, MINUS_X - 0.01f, ROW_LOBBY, "Open the settings when back in the lobby", LABEL_H, -1,
+                 0xc0c8d0);
+        row_text(panel, lx0, MINUS_X - 0.01f, ROW_TRACKING, "Tracking (headset and controllers)", LABEL_H, -1, 0xc0c8d0);
         // Scroll bar on the right edge: the viewport's share of the rows, highlighted under
         // the laser or while grabbed.
         bool bar_hot = false;
@@ -1017,11 +1033,12 @@ void settings_build(LobbyPanel *panel, LobbyPointer pointers[LOBBY_POINTERS])
     }
 
     static const char *labels[BTN_COUNT] = {"-", "+", "-", "+", "-", "+", "-", "+", "", "On", "Close", "Reset settings",
-                                            "Confirm", "Calibrate", "Cancel", "", "Off", "Surface test"};
+                                            "Confirm", "Calibrate", "Cancel", "", "Off", "Surface test", "On", "Reset"};
     labels[BTN_RATE] = g.rate;
     labels[BTN_RESET] = g.reset_armed_us ? "Click again to reset" : "Reset settings";
     labels[BTN_CENTER] = g_cfg && !g_cfg->center_on_connect ? "Off" : "On";
     labels[BTN_HUD] = g_cfg && g_cfg->hud ? "On" : "Off";
+    labels[BTN_LOBBY] = g_cfg && !g_cfg->lobby_settings ? "Off" : "On";
     labels[BTN_CANCEL] = g.surface_test ? "Close" : "Cancel";
     for (int b = 0; b < BTN_COUNT; b++) {
         if (!button_active(b))
@@ -1052,6 +1069,7 @@ void settings_build(LobbyPanel *panel, LobbyPointer pointers[LOBBY_POINTERS])
             break;
         const bool armed = b == BTN_RESET && g.reset_armed_us;
         const bool on = (b == BTN_CENTER && g_cfg && g_cfg->center_on_connect) || (b == BTN_HUD && g_cfg && g_cfg->hud) ||
+                        (b == BTN_LOBBY && g_cfg && g_cfg->lobby_settings) ||
                         (b == BTN_SURFACE && g.surface_test);
         it->fill = down ? 0x4a5670 : armed ? 0x5a1c1c : on ? 0x1c4a30 : hover ? 0x263044 : 0x161c28;
         it->outline = hover ? 0xffd040 : b == BTN_RESET ? 0xc05050 : b == BTN_CONFIRM ? 0x60c080 : 0x7088a0;

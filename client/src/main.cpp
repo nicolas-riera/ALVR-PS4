@@ -36,8 +36,9 @@
 #include "audio.h"
 #include "video.h"
 #include "bench.h"
+#include "trackview.h"
 
-#define ALVR_PS4_VERSION "0.11.0"
+#define ALVR_PS4_VERSION "0.11.1"
 #if ALVR_PS4_DEV
 #define ALVR_PS4_TITLE "ALVR PS4 (Dev)"
 #else
@@ -159,6 +160,42 @@ static bool g_lobby_shown = false;             // the last frame was the lobby
 // ALVR session stays open with tracking, audio and microphone, but the video is not
 // decoded, the buttons are not sent to SteamVR and the game's vibrations are ignored.
 static std::atomic<bool> g_stream_paused{false}; // also read by the network thread (haptics)
+// Switching between the lobby and the stream fades to black and back, both ways: the lobby
+// fades out once a stream frame is ready, then the stream fades in (frames converted dark);
+// the lobby asked for while streaming fades the stream out before pausing it. A stream that
+// stops gives way to the lobby fading in.
+static const uint64_t SWITCH_FADE_US = 300000, SWITCH_HOLD_US = 80000;
+static float g_lobby_black = 0.0f;    // lobby faded to black by a switch (0 none .. 1 black)
+static bool g_video_shown = false;    // the last frame handed to the compositor was the stream
+static uint64_t g_video_since_us;     // the stream is shown since then (its fade in)
+static uint64_t g_to_lobby_us;        // lobby asked for while streaming: the stream fades out since then (0: none)
+static bool g_lobby_settings_pending; // the stream gave way to the lobby: the settings open there
+// Headset worn, from its proximity sensor (hmu_mount in the device information, read live
+// by libSceHmd): 1 worn, 0 not worn, -1 unknown (never seen worn in this run; then the
+// headset turning is the clue).
+static int g_headset_worn = -1;
+// Tracking resets (back from the PS menu, or Reset tracking in the settings) estimate the
+// PS Camera's tilt again, which moves the positions the tracker gives by a few centimetres
+// at the user's distance (the floor height varied a little after each reset). The floor is
+// re-anchored on the user: the neck's height just before the reset against the first
+// second after it; the camera height moves by the difference when the user stayed in place.
+struct NeckSample {
+    bool valid;
+    float x, y, z;
+    uint64_t at_us;
+};
+static NeckSample g_neck;          // smoothed neck position while the headset is tracked
+static NeckSample g_neck_ref;      // the last one before a tracking reset (valid: re-anchoring pending)
+static uint64_t g_neck_after_us;   // tracked again after the reset since then (0: not yet)
+static const float NECK_TO_EYES_UP_M = 0.075f, NECK_TO_EYES_FORWARD_M = 0.0805f; // usual neck model
+static const float REANCHOR_MAX_MOVE_M = 0.25f, REANCHOR_MAX_DY_M = 0.12f;
+
+static void neck_snapshot_for_reset(uint64_t now)
+{
+    g_neck_ref = g_neck;
+    g_neck_ref.valid = g_neck.valid && now - g_neck.at_us < 1500000;
+    g_neck_after_us = 0;
+}
 // First launch (no height saved yet): the height wizard shows in the lobby and the PC is
 // not searched for until it is confirmed.
 static bool g_wizard_pending = false; // also after a settings Reset
@@ -224,6 +261,29 @@ static auto const system_receive_event = (int (*)(SystemServiceEvent *))sceSyste
 
 static bool g_in_background = false; // PS menu or another app in front
 
+// Recalibrates the headset and every registered controller (back from the PS menu, or
+// Reset tracking in the settings).
+static void reset_tracking(const char *why)
+{
+    LOG("%s: recalibrating the tracking", why);
+    TrackedDevice devs[(MOVE_MAX + 1) * (1 + OTHER_USERS)];
+    int n = 0;
+    for (int i = 0; i < MOVE_MAX; i++)
+        devs[n++] = g_moves[i].track;
+    devs[n++] = g_pad.track;
+    for (int k = 0; k < g_other_count; k++) {
+        for (int i = 0; i < MOVE_MAX; i++)
+            devs[n++] = g_others[k].moves[i].track;
+        devs[n++] = g_others[k].pad.track;
+    }
+    tracker_recalibrate_all(devs, n);
+    g_floor_set = false;
+    // The headset counts as not initialized until the camera sees it again (stale
+    // results from before the recalibration are ignored).
+    g_hmd_tracking_init = false;
+    g_hmd_init_after_us = sceKernelGetProcessTime() + 300000;
+}
+
 static void poll_system_events()
 {
     static SystemServiceStatus last;
@@ -231,25 +291,11 @@ static void poll_system_events()
     memset(&st, 0, sizeof(st));
     if (system_get_status(&st) < 0)
         return;
+    if (!last.is_in_background_execution && st.is_in_background_execution)
+        neck_snapshot_for_reset(sceKernelGetProcessTime()); // the tracking is reset on the way back
     if (last.is_in_background_execution && !st.is_in_background_execution) {
         // Back from the PS menu: reset the tracking (gyro drift), as some games do.
-        LOG("back from the PS menu: recalibrating the tracking");
-        TrackedDevice devs[(MOVE_MAX + 1) * (1 + OTHER_USERS)];
-        int n = 0;
-        for (int i = 0; i < MOVE_MAX; i++)
-            devs[n++] = g_moves[i].track;
-        devs[n++] = g_pad.track;
-        for (int k = 0; k < g_other_count; k++) {
-            for (int i = 0; i < MOVE_MAX; i++)
-                devs[n++] = g_others[k].moves[i].track;
-            devs[n++] = g_others[k].pad.track;
-        }
-        tracker_recalibrate_all(devs, n);
-        g_floor_set = false;
-        // The headset counts as not initialized until the camera sees it again (stale
-        // results from before the recalibration are ignored).
-        g_hmd_tracking_init = false;
-        g_hmd_init_after_us = sceKernelGetProcessTime() + 300000;
+        reset_tracking("back from the PS menu");
     }
     if (st.is_system_ui_overlaid != last.is_system_ui_overlaid ||
         st.is_in_background_execution != last.is_in_background_execution ||
@@ -376,6 +422,50 @@ static bool lobby_haptics_allowed()
     return st.state != ALVR_STREAMING || g_stream_paused;
 }
 
+// Neck position smoothed over ~0.3 s while the headset is tracked (the eyes' midpoint minus
+// the usual neck-to-eyes offset, so nodding or turning the head barely moves it); after a
+// tracking reset, once tracked again for 1 s, the floor is re-anchored (see g_neck_ref).
+static void update_neck_and_reanchor()
+{
+    const uint64_t now = sceKernelGetProcessTime();
+    if (!g_hmd_tracking_init || g_tracker.position_quality != 9 || g_in_background)
+        return;
+    float hp[3], hq[4];
+    head_pose(hp, hq);
+    const Vec3 n = v3(hp[0], hp[1], hp[2]) -
+                   rotate(Quat{hq[0], hq[1], hq[2], hq[3]}, v3(0.0f, NECK_TO_EYES_UP_M, -NECK_TO_EYES_FORWARD_M));
+    if (!g_neck.valid || now - g_neck.at_us > 200000) { // first sample, or after a gap: start again
+        g_neck = NeckSample{true, n.x, n.y, n.z, now};
+    } else {
+        float k = (now - g_neck.at_us) / 300000.0f;
+        k = k > 1.0f ? 1.0f : k;
+        g_neck.x += (n.x - g_neck.x) * k;
+        g_neck.y += (n.y - g_neck.y) * k;
+        g_neck.z += (n.z - g_neck.z) * k;
+        g_neck.at_us = now;
+    }
+    if (!g_neck_ref.valid)
+        return;
+    if (!g_neck_after_us)
+        g_neck_after_us = now;
+    if (now - g_neck_after_us < 1000000)
+        return;
+    g_neck_ref.valid = false;
+    const float dx = g_neck.x - g_neck_ref.x, dy = g_neck.y - g_neck_ref.y, dz = g_neck.z - g_neck_ref.z;
+    const float moved = sqrtf(dx * dx + dz * dz);
+    if (g_config.camera_height_cm <= 0) // floor still a guess: estimated again from the headset
+        return;
+    if (moved > REANCHOR_MAX_MOVE_M || fabsf(dy) > REANCHOR_MAX_DY_M) {
+        LOG("floor: not re-anchored after the tracking reset: the user moved (%.2f m sideways, %+.3f m up)", moved, dy);
+        return;
+    }
+    const int before = g_config.camera_height_cm;
+    const int cm = (int)lroundf(before - dy * 100.0f);
+    g_config.camera_height_cm = cm < 1 ? 1 : cm > 300 ? 300 : cm;
+    LOG("floor: re-anchored after the tracking reset: neck %+.1f cm (moved %.2f m sideways), camera height %d -> %d cm",
+        dy * 100.0f, moved, before, g_config.camera_height_cm);
+}
+
 // Once per frame, before the uplink: tracking initialization, floor, play space centre.
 static void update_tracking_state(bool streaming)
 {
@@ -396,6 +486,7 @@ static void update_tracking_state(bool streaming)
         set_center_at_head("SteamVR connected");
         center_pending = false;
     }
+    update_neck_and_reanchor();
     if (g_config.camera_height_cm > 0) {
         g_floor_y = -g_config.camera_height_cm / 100.0f;
         g_floor_set = true;
@@ -789,6 +880,49 @@ static void fill_lobby_pad(LobbyView::Pad *d, const PadController &p, char label
     d->label = label;
 }
 
+// Every user's controllers into the view: the PS Moves of the user playing (with their
+// emulated trackpad) and their DualShock 4 first, then the other users' labelled with the
+// user number.
+static void fill_lobby_controllers(LobbyView *view)
+{
+    for (int i = 0; i < MOVE_MAX; i++) {
+        LobbyView::Controller &c = view->controllers[i];
+        const WandInput &w = g_wand[i];
+        fill_lobby_move(&c, g_moves[i], move_index_hand(i) == HAND_LEFT ? 'L' : 'R');
+        c.pad_touch = w.pad_touch;
+        c.pad_click = w.pad_click;
+        c.pad_x = w.pad_x;
+        c.pad_y = w.pad_y;
+    }
+    fill_lobby_pad(&view->pads[0], g_pad, 0, 0);
+    for (int k = 0; k < g_other_count && k < OTHER_USERS; k++) {
+        const char label = (char)('2' + k);
+        for (int i = 0; i < MOVE_MAX; i++)
+            fill_lobby_move(&view->controllers[MOVE_MAX * (k + 1) + i], g_others[k].moves[i], label);
+        fill_lobby_pad(&view->pads[k + 1], g_others[k].pad, label, k + 1);
+    }
+}
+
+// ALVR PS4 Tracking Viewer on the PC: the lobby's controllers, plus the headset, in the lobby
+// and while streaming.
+static void send_trackview(uint64_t now)
+{
+    static LobbyView view;
+    memset(&view, 0, sizeof(view));
+    fill_lobby_controllers(&view);
+    float hp[3], hq[4];
+    head_pose(hp, hq);
+    view.headset.visible = g_hmd_tracking_init;
+    view.headset.pos = v3(hp[0], hp[1], hp[2]);
+    view.headset.rot = Quat{hq[0], hq[1], hq[2], hq[3]};
+    view.headset.tracked = !headset_lost(now) && (g_tracker.position_quality == 9 || g_tracker.position_quality == 6);
+    view.floor_y = g_floor_y;
+    view.center_x = g_center_x;
+    view.center_z = g_center_z;
+    view.grid_visible = g_floor_set;
+    trackview_send(&view, now);
+}
+
 // Stereo lobby, rendered in software into the side-by-side buffer and handed to the
 // system compositor together with the pose it was rendered for.
 static bool render_lobby(Screen *s)
@@ -832,16 +966,11 @@ static bool render_lobby(Screen *s)
     view.floor_y = floor_y;
     view.center_x = g_center_x;
     view.center_z = g_center_z;
+    fill_lobby_controllers(&view);
     SettingsRay rays[LOBBY_POINTERS];
     memset(rays, 0, sizeof(rays));
     for (int i = 0; i < MOVE_MAX; i++) {
-        LobbyView::Controller &c = view.controllers[i];
-        const WandInput &w = g_wand[i];
-        fill_lobby_move(&c, g_moves[i], move_index_hand(i) == HAND_LEFT ? 'L' : 'R');
-        c.pad_touch = w.pad_touch;
-        c.pad_click = w.pad_click;
-        c.pad_x = w.pad_x;
-        c.pad_y = w.pad_y;
+        const LobbyView::Controller &c = view.controllers[i];
         // Settings laser: from the sphere along the controller's forward (-Z).
         rays[i].valid = c.visible && g_moves[i].track.has_orientation;
         rays[i].origin = c.pos;
@@ -851,8 +980,7 @@ static bool render_lobby(Screen *s)
     }
     // DualShock 4: laser from the light bar along the pad's forward (-Z), Cross clicks.
     {
-        LobbyView::Pad &d = view.pads[0];
-        fill_lobby_pad(&d, g_pad, 0, 0);
+        const LobbyView::Pad &d = view.pads[0];
         SettingsRay &r = rays[MOVE_MAX];
         r.valid = d.visible && !d.floating && g_pad.track.has_orientation;
         r.origin = d.pos;
@@ -861,17 +989,15 @@ static bool render_lobby(Screen *s)
         r.seen = d.tracked;
         r.scroll = g_pad.connected ? g_pad.ry : 0.0f; // right stick scrolls the settings
     }
-    // Other users' controllers, labelled with the user number (no lasers).
-    for (int k = 0; k < g_other_count && k < OTHER_USERS; k++) {
-        const char label = (char)('2' + k);
-        for (int i = 0; i < MOVE_MAX; i++)
-            fill_lobby_move(&view.controllers[MOVE_MAX * (k + 1) + i], g_others[k].moves[i], label);
-        fill_lobby_pad(&view.pads[k + 1], g_others[k].pad, label, k + 1);
-    }
     view.time_s = now / 1e6f;
 
     // Settings panel (START in the lobby), or the first launch wizard.
     static LobbyPanel panel;
+    // Back from the stream: the settings open (unless turned off in them).
+    if (g_lobby_settings_pending && !settings_is_open() && !g_wizard_pending && !headset_lost(now) &&
+        g_config.lobby_settings)
+        settings_open(v3(hp[0], hp[1], hp[2]));
+    g_lobby_settings_pending = false;
     if (g_wizard_pending && !settings_is_open() && !headset_lost(now))
         settings_open_wizard(v3(hp[0], hp[1], hp[2]));
     if (settings_is_open()) {
@@ -903,6 +1029,10 @@ static bool render_lobby(Screen *s)
             g_floor_set = false; // guessed again from the headset height
             g_wizard_pending = true; // the height wizard opens on the next frame
         }
+        if (actions & SETTINGS_RESET_TRACKING) {
+            neck_snapshot_for_reset(now); // the user stands still, pointing at the panel
+            reset_tracking("Reset tracking in the settings");
+        }
         if ((actions & SETTINGS_CONFIRMED) && g_wizard_pending) {
             g_wizard_pending = false;
             start_alvr(); // once: after a Reset the PC link is already running
@@ -925,6 +1055,7 @@ static bool render_lobby(Screen *s)
     else
         lost_black = lost_black - step < 0.0f ? 0.0f : lost_black - step;
     view.brightness = 1.0f - lost_black;
+    view.black = g_lobby_black;
     view.overlay_text = nullptr;
     if (!g_hmd_tracking_init) {
         view.beacon = true;
@@ -1229,6 +1360,8 @@ static void wait_for_headset(Screen *s)
 // dialog asks for it again (not while the app is in the background). Once it is back,
 // a handle made invalid by the power cycle is reopened and registered with the tracker
 // again, and the tracking counts as not initialized until the camera sees the headset.
+static void update_worn_sensor();
+
 static void monitor_headset(unsigned frame, uint64_t now)
 {
     static bool lost = false;
@@ -1242,6 +1375,7 @@ static void monitor_headset(unsigned frame, uint64_t now)
             LOG("HMD status changed: %s -> %s", hmd_status_name(prev), hmd_status_name(g_hmd.info.status));
             status_since = now;
         }
+        update_worn_sensor();
     }
     hmd_setup_poll();
     const uint32_t status = g_hmd.info.status;
@@ -1269,19 +1403,49 @@ static void monitor_headset(unsigned frame, uint64_t now)
     }
 }
 
-// Headset tracking not started for 10 s while the headset moves (it is worn, not lying
-// somewhere the camera cannot see): the system's "confirm your position" screen is opened,
-// once per run (VR service dialog, as VR Worlds does).
+// Headset worn sensor, from the device information monitor_headset refreshes: hmu_mount is
+// the proximity sensor (checked on hardware: 0 when the headset is taken off, 1 when put
+// on), trusted once it has been 1 in this run. Every change of the information is logged in
+// full.
+static void update_worn_sensor()
+{
+    static HmdDeviceInformation last;
+    static bool have_last, seen_worn;
+    const HmdDeviceInformation &info = g_hmd.info;
+    if (!have_last || memcmp(&info, &last, sizeof(info)) != 0) {
+        const uint8_t *b = (const uint8_t *)&info;
+        char hex[3 * sizeof(info) + 1];
+        for (size_t i = 0; i < sizeof(info); i++)
+            snprintf(hex + 3 * i, 4, "%02x ", b[i]);
+        LOG("HMD device information: status=%s hmu_mount=%u raw %s", hmd_status_name(info.status), info.hmu_mount, hex);
+        last = info;
+        have_last = true;
+    }
+    if (info.status != HMD_STATUS_READY) {
+        g_headset_worn = -1;
+        return;
+    }
+    seen_worn = seen_worn || info.hmu_mount;
+    const int worn = seen_worn ? info.hmu_mount != 0 : -1;
+    if (worn != g_headset_worn)
+        LOG("headset %s (worn sensor)", worn > 0 ? "worn" : worn == 0 ? "taken off" : "worn state unknown");
+    g_headset_worn = worn;
+}
+
+// Headset tracking not started for 10 s while the headset is worn (not lying somewhere the
+// camera cannot see): the system's "confirm your position" screen is opened, once per run
+// (VR service dialog, as VR Worlds does). Worn: the headset's sensor when it answers (10 s
+// worn), else the headset turning.
 static void confirm_position_if_stuck(uint64_t now)
 {
-    static uint64_t since;
+    static uint64_t since, worn_since;
     static bool opened, have_ref, moved;
     static Quat ref;
     vr_service_dialog_poll();
     if (opened)
         return;
     if (g_hmd_tracking_init || g_in_background || hmd_setup_running() || !g_hmd.initialized) {
-        since = 0;
+        since = worn_since = 0;
         have_ref = moved = false;
         return;
     }
@@ -1302,7 +1466,17 @@ static void confirm_position_if_stuck(uint64_t now)
             }
         }
     }
-    if (moved && now - since >= 10000000 && vr_service_dialog_open())
+    bool worn = moved;
+    uint64_t from = since;
+    if (g_headset_worn >= 0) {
+        worn = g_headset_worn == 1;
+        if (!worn)
+            worn_since = 0;
+        else if (!worn_since)
+            worn_since = now;
+        from = worn_since > since ? worn_since : since;
+    }
+    if (worn && now - from >= 10000000 && vr_service_dialog_open())
         opened = true;
 }
 
@@ -1371,6 +1545,7 @@ static void handle_lobby_toggle(uint64_t now, bool pc_connected)
     // the stream is paused until it is confirmed.
     static bool wizard_paused;
     if (pc_connected && g_wizard_pending && !g_stream_paused) {
+        g_to_lobby_us = 0;
         g_stream_paused = true;
         wizard_paused = true;
         video_set_paused(true);
@@ -1385,6 +1560,7 @@ static void handle_lobby_toggle(uint64_t now, bool pc_connected)
     }
     if (!pc_connected) {
         wizard_paused = false;
+        g_to_lobby_us = 0;
         if (g_stream_paused) {
             g_stream_paused = false;
             video_set_paused(false);
@@ -1409,16 +1585,54 @@ static void handle_lobby_toggle(uint64_t now, bool pc_connected)
         if (fired || now - held_since[i] < LOBBY_HOLD_US)
             continue;
         fired = true;
-        g_stream_paused = !g_stream_paused;
-        video_set_paused(g_stream_paused);
-        if (!g_stream_paused)
-            settings_close();
+        const char *what;
+        if (g_to_lobby_us) { // again during the stream's fade out: it stays
+            g_to_lobby_us = 0;
+            what = "back to the game";
+        } else if (!g_stream_paused && g_video_shown) { // the stream fades out first (finish_lobby_switch)
+            g_to_lobby_us = now;
+            what = "lobby";
+        } else {
+            g_stream_paused = !g_stream_paused;
+            video_set_paused(g_stream_paused);
+            if (!g_stream_paused)
+                settings_close();
+            what = g_stream_paused ? "lobby" : "back to the game";
+        }
         move_vibrate(&g_moves[i], 200, 120);
-        LOG("stream: %s (%s held)", g_stream_paused ? "lobby" : "back to the game",
-            move_index_hand(i) == HAND_LEFT ? "left Cross" : "right Circle");
+        LOG("stream: %s (%s held)", what, move_index_hand(i) == HAND_LEFT ? "left Cross" : "right Circle");
     }
     if (!any_held)
         fired = false;
+}
+
+// The stream has faded out after the lobby was asked for: it is paused now.
+static void finish_lobby_switch(uint64_t now)
+{
+    if (!g_to_lobby_us || now - g_to_lobby_us < SWITCH_FADE_US + SWITCH_HOLD_US)
+        return;
+    g_to_lobby_us = 0;
+    if (!g_stream_paused) {
+        g_stream_paused = true;
+        video_set_paused(true);
+    }
+}
+
+// Brightness of the stream frames converted now: they fade in once the stream is shown and
+// out when the lobby is asked for; black while the lobby is shown (the first frames shown
+// after it were converted dark).
+static float stream_brightness(uint64_t now)
+{
+    if (bench_active())
+        return 1.0f;
+    if (!g_video_shown)
+        return 0.0f;
+    float b = (now - g_video_since_us) / (float)SWITCH_FADE_US;
+    if (g_to_lobby_us) {
+        const float out = 1.0f - (now - g_to_lobby_us) / (float)SWITCH_FADE_US;
+        b = out < b ? out : b;
+    }
+    return b < 0.0f ? 0.0f : b > 1.0f ? 1.0f : b;
 }
 
 // START on either Move, or OPTIONS on the DualShock 4, opens / closes the settings in the
@@ -1489,6 +1703,7 @@ int main()
         LOG("first launch: the PC is searched for once the height is confirmed");
     else
         start_alvr();
+    trackview_init();
     LOG("ready");
 
     unsigned frame = 0;
@@ -1505,6 +1720,7 @@ int main()
         update_tracking_state(pc_connected);
         confirm_position_if_stuck(now);
         handle_lobby_toggle(now, pc_connected);
+        finish_lobby_switch(now);
         const bool in_stream = pc_connected && !g_stream_paused; // the game is shown
         update_pad_rumble(in_stream);
         move_set_vibration_strength(g_config.vibration_percent);
@@ -1530,6 +1746,8 @@ int main()
         }
         handle_start_button(now);
         send_alvr_uplink();
+        if (trackview_poll(now))
+            send_trackview(now);
         if (screen.handle > 0 && reproj_active()) {
             // 3D lobby once the tracker has given an orientation; a plain 2D screen is only
             // shown before that. Afterwards the lobby keeps the last pose (the quality
@@ -1539,9 +1757,32 @@ int main()
                 lobby_started = true;
             // A video bench clip is shown like a stream (Dev build).
             const bool video_on = in_stream || bench_active();
-            if (!video_on)
+            // The stream replaces the lobby once the lobby has faded to black (at once when
+            // there is no 3D lobby yet, or for a bench clip).
+            const bool try_video = video_on && (g_video_shown || !lobby_started || g_lobby_black >= 1.0f || bench_active());
+            if (!try_video)
                 video_not_shown();
-            bool stereo_video = video_on && render_video();
+            video_set_brightness(stream_brightness(now));
+            bool stereo_video = try_video && render_video();
+            if (stereo_video != g_video_shown) {
+                g_video_shown = stereo_video;
+                if (stereo_video) {
+                    g_video_since_us = now;
+                } else { // back to the lobby: from black, with the settings open
+                    g_lobby_black = 1.0f;
+                    g_lobby_settings_pending = true;
+                }
+                LOG("display: %s", stereo_video ? "stream (fading in)" : "lobby (fading in)");
+            }
+            // The lobby fades out while a stream frame waits, else in.
+            static uint64_t fade_last_us;
+            const float fade_step = fade_last_us && now > fade_last_us ? (now - fade_last_us) / (float)SWITCH_FADE_US : 0.0f;
+            fade_last_us = now;
+            if (!stereo_video) {
+                const bool leaving = video_on && video_frame_ready();
+                g_lobby_black += leaving ? fade_step : -fade_step;
+                g_lobby_black = g_lobby_black < 0.0f ? 0.0f : g_lobby_black > 1.0f ? 1.0f : g_lobby_black;
+            }
             if (stereo_video && g_loop_resume_us) {
                 // Only from a wake-up of this iteration (a stale one gave a 15 s "work time",
                 // hence a 15 s lead: the submission never came before the pass).

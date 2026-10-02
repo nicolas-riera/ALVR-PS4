@@ -7,7 +7,8 @@
     polyglot: cmd runs the header, which starts PowerShell on the same file; PowerShell sees
     the header as a <# block comment #>. pc-setup/setup.ps1 is embedded with the settings
     template (pc-setup/alvr-ps4-session.json) as gzip + base64 and the SteamVR status icons
-    (pc-setup/icons, made by tools/icons/make_icons.py) as base64.
+    (pc-setup/icons, made by tools/icons/make_icons.py) as base64, and ALVR PS4 Tracking
+    Viewer (build it first: wsl -d Debian -- bash tools/build_companion.sh) as gzip + base64.
 
 Usage: python tools/make_release.py [--bat-only]
   --bat-only: only rebuild ALVR-PS4-Setup.bat (no stable pkg needed).
@@ -46,6 +47,11 @@ def main():
     template = open(os.path.join(ROOT, "pc-setup", "alvr-ps4-session.json"), "rb").read()
     script = open(os.path.join(ROOT, "pc-setup", "setup.ps1"), encoding="utf-8").read()
     assert script.count("@@SESSION_TEMPLATE@@") == 1 and script.count("@@ICONS@@") == 1
+    assert script.count("@@TRACKING_VIEWER@@") == 1
+    viewer = os.path.join(ROOT, "companion", "build", "ALVR PS4 Tracking Viewer.exe")
+    if not os.path.exists(viewer):
+        raise SystemExit("build ALVR PS4 Tracking Viewer first: wsl -d Debian -- bash tools/build_companion.sh")
+    script = script.replace("@@TRACKING_VIEWER@@", gz64(open(viewer, "rb").read()))
     script = script.replace("@@SESSION_TEMPLATE@@", gz64(template))
     icon_dir = os.path.join(ROOT, "pc-setup", "icons")
     icons = "|".join(f"{n}:{base64.b64encode(open(os.path.join(icon_dir, n), 'rb').read()).decode('ascii')}"

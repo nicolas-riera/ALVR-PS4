@@ -97,6 +97,14 @@ struct LobbyView {
         char label;           // 0 for the user playing, else the user number '2'..'4'
         bool floating;        // not tracked: shown still in front of the play area
     } pads[LOBBY_PADS];
+    // The PS VR headset as a wireframe: only for ALVR PS4 Tracking Viewer on the PC (never in the
+    // headset itself). Pose of the centre between the eyes, -Z forward.
+    struct Headset {
+        bool visible;
+        Vec3 pos;
+        Quat rot;
+        bool tracked;
+    } headset;
     float time_s;           // for animations (rumble)
     const char *info[8];    // info panel lines (nullptr-terminated)
     Vec3 info_pos;          // panel centre, tracker space
@@ -116,6 +124,9 @@ struct LobbyView {
     float overlay_brightness;
     Vec3 head_pos; // centre between the eyes, for the attached text
     Quat head_rot;
+    // Fade of the whole picture to black, the controllers and the attached text included
+    // (switching between the lobby and the stream): 0 = none, 1 = black.
+    float black;
 };
 
 // One eye (0 = left, 1 = right) into its own image.

@@ -49,6 +49,7 @@ enum SettingsAction : unsigned {
     SETTINGS_CONFIRMED = 8,      // the first launch wizard was confirmed (height set, panel closed)
     SETTINGS_CALIBRATED = 16,    // the height calibration succeeded (with SETTINGS_HEIGHT_CHANGED)
     SETTINGS_VIBRATION_SET = 32, // vibration strength slider released: *clicked is the pointer, for a sample buzz
+    SETTINGS_RESET_TRACKING = 64, // Reset tracking clicked: recalibrate the headset and the controllers
 };
 
 void settings_open(Vec3 head_pos);

@@ -628,6 +628,274 @@ static void draw_pad(const EyeTarget &t, const LobbyView::Pad &p, float time_s)
     }
 }
 
+// Filled pill (stadium) of half length a along `du` and half thickness b along `dv`.
+static void pill3d(const EyeTarget &t, Vec3 c, Vec3 du, Vec3 dv, float a, float b, uint32_t rgb)
+{
+    Vec3 poly[12];
+    for (int i = 0; i < 12; i++) {
+        const float ang = 6.2831853f * (i + 0.5f) / 12;
+        const float side = cosf(ang) >= 0.0f ? 1.0f : -1.0f;
+        poly[i] = to_view(t, c + du * ((a - b) * side + b * cosf(ang)) + dv * (b * sinf(ang)));
+    }
+    fill_poly_view(t, poly, 12, rgb);
+}
+
+static Vec3 unit(Vec3 v)
+{
+    const float n = sqrtf(v.x * v.x + v.y * v.y + v.z * v.z);
+    return n > 0.0f ? v * (1.0f / n) : v;
+}
+
+// PS VR headset (CUH-ZVR) as wireframe (Tracking Viewer only), measured on Sony's product
+// photos (the side view scaled to the headset's 277 mm length), in the head frame (origin
+// between the eyes, -Z forward):
+// - the front unit: a black front face, silver top and bottom, and black sides whose back
+//   edge is the silver C-shaped trim (deepest at mid-height); behind it the rubber light
+//   shield, with the lenses inside;
+// - the rigid headband, high on the forehead and going down to the rear unit at the back of
+//   the head, its tongue down to the top of the front unit, the forehead pad rising above
+//   it, the rear unit with its release button and the rear pad;
+// - the nine lights: the bar under the middle of the front face, one at each top and bottom
+//   corner (on the edge, set back from the front, wrapping onto the side), one upright on
+//   each side's trim, and two at the back corners of the rear unit. Grey (all of the headset)
+//   while the camera does not see it.
+static void draw_headset(const EyeTarget &t, const LobbyView::Headset &hs)
+{
+    const Vec3 X = rotate(hs.rot, v3(1, 0, 0)), Y = rotate(hs.rot, v3(0, 1, 0)), Z = rotate(hs.rot, v3(0, 0, 1));
+    auto at = [&](float x, float y, float z) { return hs.pos + X * x + Y * y + Z * z; };
+    const bool on = hs.tracked;
+    const uint32_t white = PIXEL_ALPHA | (on ? 0xc8c8c8 : 0x686868), silver = PIXEL_ALPHA | (on ? 0xe8e8e8 : 0x707070);
+    const uint32_t black = PIXEL_ALPHA | (on ? 0x7c8490 : 0x484c52), pad = PIXEL_ALPHA | (on ? 0x5c626c : 0x3c4046);
+    const uint32_t led = on ? 0x4a8cff : 0x505050;
+
+    // Front unit: half width W, from YB to YT; front face around ZF (rounded both ways); the
+    // sides end at the trim zb(y), 26 mm ahead of the eyes at mid-height, 58 mm at the top
+    // and bottom.
+    const float W = 0.090f, YT = 0.040f, YB = -0.044f, YC = 0.5f * (YT + YB), HH = 0.5f * (YT - YB);
+    const float ZF = -0.108f, RC = 0.034f, BULGE = 0.008f, TRIM = 0.008f;
+    auto rel = [&](float y) {
+        const float u = (y - YC) / HH;
+        return u < -1.0f ? -1.0f : u > 1.0f ? 1.0f : u;
+    };
+    auto zb = [&](float y) {
+        const float u = rel(y);
+        return -0.026f - 0.032f * (1.0f - sqrtf(1.0f - u * u));
+    };
+    auto zf = [&](float y) {
+        const float u = rel(y);
+        return ZF + 0.006f * u * u;
+    };
+    // Outline at height y seen from above, from the back of the left side round the front to
+    // the back of the right side (17 points); `inset` rounds the top and bottom edges.
+    auto slice = [&](float y, float inset, Vec3 out[17]) {
+        const float w = W - inset, rc = RC - inset, z0 = zf(y) + inset, zbk = zb(y);
+        int n = 0;
+        out[n++] = at(-w, y, zbk);
+        for (int k = 0; k <= 4; k++) { // left front corner
+            const float a = 3.14159265f + 1.5707963f * k / 4;
+            out[n++] = at(-w + rc + rc * cosf(a), y, z0 + rc + rc * sinf(a));
+        }
+        for (int j = 1; j <= 5; j++) { // front, bulging
+            const float x = -(w - rc) + 2 * (w - rc) * j / 6, u = x / (w - rc);
+            out[n++] = at(x, y, z0 - BULGE * (1.0f - u * u));
+        }
+        for (int k = 0; k <= 4; k++) { // right front corner
+            const float a = 4.71238898f + 1.5707963f * k / 4;
+            out[n++] = at(w - rc + rc * cosf(a), y, z0 + rc + rc * sinf(a));
+        }
+        out[n++] = at(w, y, zbk);
+    };
+
+    // Rubber light shield behind the front unit: rounded sections towards the face.
+    struct ShieldSection {
+        float z, w, yt, yb, r;
+    };
+    const int NSH = 4;
+    static const ShieldSection SH[NSH] = {{-0.022f, 0.086f, 0.034f, -0.039f, 0.022f},
+                                          {-0.006f, 0.084f, 0.029f, -0.034f, 0.022f},
+                                          {0.007f, 0.080f, 0.021f, -0.026f, 0.018f},
+                                          {0.015f, 0.073f, 0.011f, -0.017f, 0.012f}};
+    auto shield_loop = [&](const ShieldSection &s, Vec3 out[16]) {
+        static const float sx[4] = {1, -1, -1, 1}, sy[4] = {1, 1, -1, -1};
+        for (int k = 0; k < 4; k++)
+            for (int j = 0; j < 4; j++) {
+                const float a = (k * 90.0f + j * 30.0f) * 0.0174533f;
+                const float cy = sy[k] > 0 ? s.yt - s.r : s.yb + s.r;
+                out[k * 4 + j] = at(sx[k] * (s.w - s.r) + s.r * cosf(a), cy + s.r * sinf(a), s.z);
+            }
+    };
+
+    // Headband: a ring round the head, its top edge 75 mm above the eyes at the forehead
+    // and 5 mm below them at the back.
+    const float zc = 0.059f, rx = 0.095f, rz = 0.091f, y_front = 0.075f, y_back = -0.005f, band = 0.028f;
+    auto ring = [&](float a, float dy, float out) {
+        const float ca = cosf(a), sa = sinf(a);
+        return at((rx + out) * sa, y_front + (y_back - y_front) * (1.0f - ca) * 0.5f + dy, zc - (rz + out) * ca);
+    };
+    auto ring_tangent = [&](float a) { return unit(ring(a + 0.01f, 0, 0) - ring(a - 0.01f, 0, 0)); };
+    const float PI = 3.14159265f, rear_half = 1.25f, rear_out = 0.012f, rear_drop = 0.012f;
+
+    // ---- Lights first: the wireframe is drawn over them. A light facing away from the
+    // viewer is hidden by the headset (the wireframe alone would show it through). ----
+    auto facing = [&](Vec3 c, Vec3 n) {
+        const Vec3 d = t.eye_pos - c;
+        return n.x * d.x + n.y * d.y + n.z * d.z > 0.0f;
+    };
+    {
+        const Vec3 c = at(0, -0.010f, zf(-0.010f) - BULGE - 0.0006f); // front bar
+        if (facing(c, Z * -1.0f))
+            pill3d(t, c, X, Y, 0.019f, 0.0042f, led);
+    }
+    // Top and bottom corners: a patch across the top (bottom), over the rounded edge and down
+    // the side, set back from the front.
+    {
+        const float r = 0.006f, z1 = -0.084f, z2 = -0.062f;
+        const int np = 7;
+        float px[np], pd[np], nx[np], ny[np]; // across the edge: x, depth below the top, normal
+        px[0] = W - 0.032f, pd[0] = 0, nx[0] = 0, ny[0] = 1;
+        for (int k = 1; k <= 5; k++) {
+            const float phi = 1.5707963f * (k - 1) / 4;
+            px[k] = W - r + r * sinf(phi), pd[k] = r - r * cosf(phi), nx[k] = sinf(phi), ny[k] = cosf(phi);
+        }
+        px[6] = W, pd[6] = r + 0.009f, nx[6] = 1, ny[6] = 0;
+        for (int sx = -1; sx <= 1; sx += 2)
+            for (int sy = -1; sy <= 1; sy += 2) {
+                const float edge = sy > 0 ? YT : YB;
+                auto p = [&](int k, float z) {
+                    return at(sx * (px[k] + nx[k] * 0.0006f), edge - sy * pd[k] + sy * ny[k] * 0.0006f, z);
+                };
+                for (int k = 0; k + 1 < np; k++) {
+                    const Vec3 n = X * (sx * 0.5f * (nx[k] + nx[k + 1])) + Y * (sy * 0.5f * (ny[k] + ny[k + 1]));
+                    if (facing(p(k, 0.5f * (z1 + z2)), n))
+                        fill_quad3d(t, p(k, z1), p(k + 1, z1), p(k + 1, z2), p(k, z2), led);
+                }
+            }
+    }
+    for (int sx = -1; sx <= 1; sx += 2) { // upright on each side's trim
+        if (!facing(at(sx * W, 0, zb(0)), X * (float)sx))
+            continue;
+        for (int i = 0; i < 6; i++) {
+            const float y0 = -0.019f + 0.034f * i / 6, y1 = -0.019f + 0.034f * (i + 1) / 6, xs = sx * (W + 0.0006f);
+            fill_quad3d(t, at(xs, y0, zb(y0) - 0.001f), at(xs, y1, zb(y1) - 0.001f), at(xs, y1, zb(y1) - TRIM + 0.001f),
+                        at(xs, y0, zb(y0) - TRIM + 0.001f), led);
+        }
+    }
+    for (int sx = -1; sx <= 1; sx += 2) { // back corners of the rear unit
+        const float a = PI + sx * 0.42f, dy = -band - 0.004f;
+        const Vec3 c = ring(a, dy, rear_out + 0.0008f);
+        if (facing(c, unit(ring(a, dy, rear_out + 0.01f) - ring(a, dy, rear_out))))
+            pill3d(t, c, Y, ring_tangent(a), 0.012f, 0.0045f, led);
+    }
+
+    // ---- Front unit ----
+    struct Slice {
+        float u, inset;
+        bool silver;
+    };
+    static const Slice SL[7] = {{1.0f, 0.004f, true},   {0.88f, 0.0f, true}, {0.45f, 0.0f, false}, {0.0f, 0.0f, false},
+                                {-0.45f, 0.0f, false}, {-0.88f, 0.0f, true}, {-1.0f, 0.004f, true}};
+    Vec3 S[7][17];
+    for (int s = 0; s < 7; s++)
+        slice(YC + SL[s].u * HH, SL[s].inset, S[s]);
+    static const int joins[7] = {1, 3, 5, 8, 11, 13, 15};
+    for (int s = 0; s < 7; s++) {
+        for (int i = 0; i < 16; i++)
+            line3d(t, S[s][i], S[s][i + 1], SL[s].silver ? silver : black);
+        if (s < 6)
+            for (int j : joins)
+                line3d(t, S[s][j], S[s + 1][j], SL[s].silver && SL[s + 1].silver ? silver : black);
+    }
+    for (int sx = -1; sx <= 1; sx += 2) { // the C-shaped trim on each side (outer and inner edge)
+        const int n = 16;
+        for (int i = 0; i < n; i++) {
+            const float y0 = YB + (YT - YB) * i / n, y1 = YB + (YT - YB) * (i + 1) / n;
+            line3d(t, at(sx * W, y0, zb(y0)), at(sx * W, y1, zb(y1)), silver);
+            line3d(t, at(sx * W, y0, zb(y0) - TRIM), at(sx * W, y1, zb(y1) - TRIM), silver);
+        }
+    }
+
+    // Light shield, joined to the trim's middle, and the lenses.
+    Vec3 L[NSH][16];
+    for (int s = 0; s < NSH; s++)
+        shield_loop(SH[s], L[s]);
+    for (int s = 0; s < NSH; s++) {
+        for (int i = 0; i < 16; i++)
+            line3d(t, L[s][i], L[s][(i + 1) % 16], pad);
+        if (s < NSH - 1)
+            for (int k = 0; k < 4; k++) {
+                line3d(t, L[s][k * 4], L[s + 1][k * 4], pad);
+                line3d(t, L[s][k * 4 + 3], L[s + 1][k * 4 + 3], pad);
+            }
+    }
+    for (int sx = -1; sx <= 1; sx += 2) {
+        line3d(t, at(sx * W, YC, zb(YC)), at(sx * SH[0].w, YC, SH[0].z), pad);
+        circle3d(t, at(sx * 0.032f, YC, -0.020f), X, Y, 0.020f, pad);
+    }
+
+    // ---- Headband ----
+    const int n = 36;
+    for (int i = 0; i < n; i++) {
+        const float a0 = 2 * PI * i / n, a1 = 2 * PI * (i + 1) / n;
+        line3d(t, ring(a0, 0, 0), ring(a1, 0, 0), white);
+        line3d(t, ring(a0, -band, 0), ring(a1, -band, 0), white);
+        const float off = fabsf(a0 - PI);
+        if (i % 3 == 0 && off > rear_half)
+            line3d(t, ring(a0, 0, 0), ring(a0, -band, 0), white);
+    }
+    // Tongue from the front of the band down to the top of the front unit.
+    {
+        const Vec3 l = at(-0.026f, YT + 0.001f, -0.050f), r = at(0.026f, YT + 0.001f, -0.050f);
+        line3d(t, ring(-0.6f, -band, 0), l, white);
+        line3d(t, l, r, white);
+        line3d(t, r, ring(0.6f, -band, 0), white);
+    }
+    // Rear unit: thicker than the band and lower, over the back third of the ring.
+    {
+        const int m = 14;
+        const float a_lo = PI - rear_half, a_hi = PI + rear_half;
+        for (int i = 0; i < m; i++) {
+            const float a0 = a_lo + (a_hi - a_lo) * i / m, a1 = a_lo + (a_hi - a_lo) * (i + 1) / m;
+            line3d(t, ring(a0, 0.003f, rear_out), ring(a1, 0.003f, rear_out), white);
+            line3d(t, ring(a0, -band - rear_drop, rear_out), ring(a1, -band - rear_drop, rear_out), white);
+            line3d(t, ring(a0, -band - rear_drop, 0), ring(a1, -band - rear_drop, 0), white);
+        }
+        for (int e = 0; e < 2; e++) {
+            const float a = e ? a_hi : a_lo;
+            line3d(t, ring(a, 0.003f, rear_out), ring(a, -band - rear_drop, rear_out), white);
+            line3d(t, ring(a, 0.003f, rear_out), ring(a, 0.003f, 0), white);
+            line3d(t, ring(a, -band - rear_drop, rear_out), ring(a, -band - rear_drop, 0), white);
+            // Release button on each side.
+            const float ab = e ? PI + 0.95f : PI - 0.95f;
+            circle3d(t, ring(ab, -band * 0.5f - 0.008f, rear_out + 0.0005f), ring_tangent(ab), Y, 0.009f, white);
+        }
+        // Rear pad inside, against the back of the head.
+        Vec3 pa = ring(PI - 0.9f, -band + 0.002f, -0.014f), pb = ring(PI - 0.9f, -band - 0.036f, -0.018f);
+        line3d(t, pa, pb, pad);
+        for (int i = 1; i <= 10; i++) {
+            const float a = PI - 0.9f + 1.8f * i / 10;
+            const Vec3 qa = ring(a, -band + 0.002f, -0.014f), qb = ring(a, -band - 0.036f, -0.018f);
+            line3d(t, pa, qa, pad);
+            line3d(t, pb, qb, pad);
+            pa = qa;
+            pb = qb;
+        }
+        line3d(t, pa, pb, pad);
+    }
+    // Forehead pad: a dome rising above the front of the band, leaning back.
+    {
+        auto front = [&](float th) { return at(-0.070f * cosf(th), 0.050f + 0.062f * sinf(th), -0.020f + 0.035f * sinf(th)); };
+        auto back = [&](float th) { return at(-0.058f * cosf(th), 0.045f + 0.045f * sinf(th), 0.020f + 0.030f * sinf(th)); };
+        const int m = 12;
+        for (int i = 0; i < m; i++) {
+            const float t0 = PI * i / m, t1 = PI * (i + 1) / m;
+            line3d(t, front(t0), front(t1), pad);
+            line3d(t, back(t0), back(t1), pad);
+        }
+        for (int i = 0; i <= 2; i++)
+            line3d(t, front(PI * i / 2), back(PI * i / 2), pad);
+    }
+}
+
 static void draw_info_panel(const EyeTarget &t, const LobbyView *view)
 {
     const float h = 0.12f, gap = 0.21f;
@@ -740,6 +1008,8 @@ void lobby_render_eye(uint32_t *pixels, int width, int height, int pitch, const 
                 darken(pixels, width, height, pitch, (uint32_t)(b * 256.0f));
         }
         draw_camera(t, v3(0, 0, 0), 0x40c0ff);
+        if (view->headset.visible)
+            draw_headset(t, view->headset);
         for (auto &c : view->controllers)
             if (c.visible)
                 draw_controller(t, c);
@@ -757,6 +1027,10 @@ void lobby_render_eye(uint32_t *pixels, int width, int height, int pitch, const 
         v = v > 255 ? 255 : v;
         draw_text3d(t, o, right, up, h, view->overlay_text, PIXEL_ALPHA | v << 16 | v << 8 | v);
     }
+    if (view->black >= 0.996f)
+        fill(pixels, width, height, pitch, PIXEL_ALPHA);
+    else if (view->black > 0.004f)
+        darken(pixels, width, height, pitch, (uint32_t)((1.0f - view->black) * 256.0f));
 }
 
 void lobby_render(uint32_t *pixels, int width, int height, int pitch, const LobbyView *view)

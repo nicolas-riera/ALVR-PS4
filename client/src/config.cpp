@@ -88,6 +88,7 @@ static void write_save(const ClientConfig *cfg)
         fprintf(f, "refresh_rate_hz=%d\n", cfg->refresh_rate);
         fprintf(f, "vibration_percent=%d\n", cfg->vibration_percent);
         fprintf(f, "hud=%d\n", cfg->hud);
+        fprintf(f, "lobby_settings=%d\n", cfg->lobby_settings);
         const bool written = !ferror(f);
         if (fclose(f) != 0 || !written)
             LOG("config: cannot write %s", tmp);
@@ -155,6 +156,8 @@ static int read_save(ClientConfig *cfg)
                 continue;
             if (sscanf(line, "hud=%d", &cfg->hud) == 1)
                 continue;
+            if (sscanf(line, "lobby_settings=%d", &cfg->lobby_settings) == 1)
+                continue;
         }
         fclose(f);
     }
@@ -172,6 +175,7 @@ void config_load(ClientConfig *cfg, int user_id)
     cfg->refresh_rate = 90;
     cfg->vibration_percent = 100;
     cfg->hud = 0;
+    cfg->lobby_settings = 1;
 
     g_user = user_id;
     int rc = sceSaveDataInitialize3(0);
@@ -211,6 +215,7 @@ void config_load(ClientConfig *cfg, int user_id)
     if (cfg->vibration_percent < 0 || cfg->vibration_percent > 100)
         cfg->vibration_percent = 100;
     cfg->hud = cfg->hud != 0;
+    cfg->lobby_settings = cfg->lobby_settings != 0;
     if (cfg->hostname[0]) {
         LOG("config: hostname %s, resolution %d%%, %d Hz, headset prediction %d%%, extra controller prediction %d ms, "
             "camera height %d cm, user height %d cm, vibration %d%%, overlay %d (save data of user 0x%x)",

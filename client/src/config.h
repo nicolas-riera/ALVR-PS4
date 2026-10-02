@@ -36,6 +36,8 @@ struct ClientConfig {
     int vibration_percent;
     // Performance overlay in the headset while streaming (1) or not (0).
     int hud;
+    // Settings panel opened each time the lobby comes back from the stream (1, default).
+    int lobby_settings;
 };
 
 // Reads the settings from the save data (defaults when there is none yet).

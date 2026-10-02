@@ -25,7 +25,9 @@ the lobby the ALVR session stays open: SteamVR keeps the headset and the control
 tracked, game audio and the microphone keep working, but the buttons are not sent to
 SteamVR (it sees them released), the game's vibrations are ignored and the video is not
 decoded. Back in the game, the picture comes back within a moment (the PC is asked for a
-full new frame).
+full new frame). Both ways the picture fades to black and back (0.3 s each). Coming back
+from the game, the settings open by themselves (turn it off in the settings: "Open the
+settings when back in the lobby"); closing them keeps you in the lobby.
 
 **Play area centre:** each time SteamVR connects, the centre of the play area is placed
 where the headset is; its direction stays the camera's (forward is towards the PS Camera)
@@ -34,8 +36,12 @@ and the floor height is unchanged. This needs ALVR's "Position recentering mode"
 play area to where the headset faced before a reconnection). Afterwards, use SteamVR's own
 recenter (hold Start, the system button).
 
-**Fix drift:** open the PS4 menu (PS button), then go back to the app: the tracking is
-reset, as in PSVR games.
+**Fix drift:** open the PS4 menu (PS button), then go back to the app, or click Reset
+tracking at the bottom of the settings: the tracking is reset, as in PSVR games. A reset
+makes the tracker estimate the camera's tilt again, which used to move the floor by a few
+centimetres; the floor is now kept under you: your neck height just before the reset is
+compared with the second after it, and the floor follows the difference (when you stayed
+in place: less than 25 cm sideways and 12 cm up or down).
 
 **Tracking loss:** a Move hidden from the camera keeps its last position. SteamVR shows it
 as "searching" after 10 s. A headset the camera has lost is shown as "searching", with
@@ -45,8 +51,9 @@ the controllers stay shown where they are.
 
 **Headset tracking not started** (at launch, or after the PS menu, until the camera sees the
 headset): the lobby shows only the PS Camera, 1.8 m ahead, blinking blue and red. If it lasts
-more than 10 seconds while the headset moves (it is worn), the PS4's own "confirm your
-position" screen opens, once per launch.
+more than 10 seconds while the headset is worn, the PS4's own "confirm your position"
+screen opens, once per launch. Worn comes from the headset's own sensor once it has said
+"worn" in this launch (until then, from the headset moving).
 
 ## Lobby settings
 
@@ -56,8 +63,9 @@ on). Point at a button with a Move and pull the trigger, or with the
 DualShock 4 (the laser comes out of its light bar) and press **✕**. Settings: your height
 (places the floor), headset prediction, controller prediction, stream resolution and
 refresh rate (both marked "restart required", in orange once changed), centring on the
-headset at SteamVR start, vibration strength, performance overlay, and Reset (click twice;
-the height panel then comes back). The rows scroll: pull the trigger on an empty spot of
+headset at SteamVR start, vibration strength, performance overlay, opening the settings
+when back in the lobby from the game, Reset tracking, and Reset settings (click twice; the
+height panel then comes back). The rows scroll: pull the trigger on an empty spot of
 the panel and drag up or down, grab the scroll bar on the right edge (or click its track to
 jump there), or push the DualShock 4's right stick up or down. Close stays at the bottom.
 
@@ -130,3 +138,47 @@ the DualShock 4 is not tracked. It is then shown still, in grey, in front of the
 ("Not tracked"), with its buttons still working (Options opens the settings). Controllers
 of other users logged in on the console are shown with their user number, and tracked
 when there is room.
+
+## Tracking Viewer on the PC
+
+**ALVR PS4 Tracking Viewer** is a small Windows program, a single portable
+`ALVR PS4 Tracking Viewer.exe` with nothing to install. The PC setup puts it in
+`ALVR-PS4_PC-Streamer\` (start it from there, there is no shortcut); the .exe can also be
+copied anywhere on its own.
+
+It shows what the PS4 tracks, live, on the lobby's floor grid: the headset, the PS Moves
+and the DualShock 4 with their pressed buttons, and the PS Camera. Something the camera
+does not see turns grey, the headset's blue lights included. It works in the lobby and
+during a game, so someone next to you can watch the tracking, or you can check the
+camera's coverage of your play area.
+
+At start it asks for the PS4's IP address, shown in the lobby's info panel. It remembers the
+address in an `.ini` file next to the .exe, and it can also be given on the command line
+(for a shortcut). The title bar says whether the PS4 answers. Without a PS4 (Cancel), it can
+still play recordings.
+
+| Mouse / key | Action |
+| --- | --- |
+| Left drag | turn around |
+| Right drag (or Shift + left drag) | move |
+| Wheel | zoom |
+| Double-click or R | reset the camera |
+| F2 | change the PS4 IP address |
+
+The bar at the bottom records what you see and plays it back:
+
+| Button | Key | Action |
+| --- | --- | --- |
+| Record / Stop | Ctrl+R | record the live tracking, stop |
+| Play / Pause | Space | play the recording, pause |
+| Live | L | back to the live tracking |
+| Load... | Ctrl+O | open a recording (or drop a `.psvrdata` file on the window, or give it on the command line) |
+| Save... | Ctrl+S | save the recording, where you choose |
+| slider | Left / Right, Home | move through the recording (5 s back / forward, to the start) |
+
+Recordings are `.psvrdata` files: every tracking state as it came from the PS4, about
+20 KB a second. The camera stays free while a recording plays. Closing the window or
+starting another recording asks first if the last one was not saved.
+
+It talks to the ALVR PS4 app over UDP port 9955 and only receives while its window is
+open. The two must be the same version: the title bar says so if they are not.

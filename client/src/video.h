@@ -79,6 +79,11 @@ void video_peek_stats(VideoStats *out);
 // Lobby while streaming: frames received are not decoded (the stream stays connected).
 // Resuming requests an IDR frame and forgets the pictures decoded before.
 void video_set_paused(bool paused);
+// Fade to black between the lobby and the stream: frames converted from now on are shown
+// at this brightness (0 black .. 1 unchanged; below 1 the conversion costs a little more).
+void video_set_brightness(float brightness);
+// A converted frame is waiting to be shown (the lobby fades out before the stream appears).
+bool video_frame_ready();
 // The PC's frame period (1 / stream frame rate), for the paced display.
 void video_set_frame_period(uint32_t period_us);
 // Performance overlay drawn into every converted frame: up to 4 lines (count 0: none), each

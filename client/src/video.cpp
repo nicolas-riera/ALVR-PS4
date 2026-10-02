@@ -737,9 +737,26 @@ static void stream_row(uint32_t *dst, const uint32_t *src, uint32_t n)
         _mm_stream_si128((__m128i *)(dst + i), _mm_load_si128((const __m128i *)(src + i)));
 }
 
+// Fade to black between the lobby and the stream (video_set_brightness): 0..64, applied by
+// the conversion jobs to every frame converted while it is below 64 (nothing to do otherwise).
+static volatile int g_brightness = 64;
+
+// Pixels times level / 64, alpha kept. n is a multiple of 4.
+static void darken_row(uint32_t *p, uint32_t n, int level)
+{
+    const __m128i zero = _mm_setzero_si128(), k = _mm_set1_epi16((short)level);
+    const __m128i rgb = _mm_set1_epi32(0x00ffffff), alpha = _mm_set1_epi32((int)0x80000000);
+    for (uint32_t i = 0; i < n; i += 4) {
+        const __m128i v = _mm_loadu_si128((const __m128i *)(p + i));
+        const __m128i lo = _mm_srli_epi16(_mm_mullo_epi16(_mm_unpacklo_epi8(v, zero), k), 6);
+        const __m128i hi = _mm_srli_epi16(_mm_mullo_epi16(_mm_unpackhi_epi8(v, zero), k), 6);
+        _mm_storeu_si128((__m128i *)(p + i), _mm_or_si128(_mm_and_si128(_mm_packus_epi16(lo, hi), rgb), alpha));
+    }
+}
+
 // Rows of the compressed eye are converted to BGRA once each (two are cached), blended
 // vertically when needed, then expanded horizontally and written out to the eye buffer.
-static void ffe_band(const FfeJob &j, int slot)
+static void ffe_band(const FfeJob &j, int slot, int level)
 {
     const FfeLut &l = g_lut;
     Coeffs k;
@@ -768,6 +785,8 @@ static void ffe_band(const FfeJob &j, int slot)
             src = blend;
         }
         expand_row(src, out, j.eye);
+        if (level < 64)
+            darken_row(out, j.width, level);
         stream_row(j.dst + (size_t)y * j.dst_pitch, out, j.width);
     }
 }
@@ -783,13 +802,22 @@ static pthread_cond_t g_job_cond = PTHREAD_COND_INITIALIZER;
 static Job g_jobs[CONVERT_JOBS_MAX];
 static unsigned g_job_gen, g_jobs_done;
 static int g_active_jobs = CONVERT_JOBS; // jobs of the current frame
+static int g_job_brightness = 64;        // brightness of the current frame (g_brightness when it started)
 
 static void run_job(int i)
 {
-    if (g_jobs[i].ffe)
-        ffe_band(g_jobs[i].fov, i);
-    else
+    const int level = g_job_brightness;
+    if (g_jobs[i].ffe) {
+        ffe_band(g_jobs[i].fov, i, level);
+    } else {
         convert(g_jobs[i].conv);
+        if (level < 64) { // only during a fade: the rows just written are read back
+            _mm_sfence();
+            const ConvertJob &c = g_jobs[i].conv;
+            for (uint32_t r = 0; r < c.h; r++)
+                darken_row(c.dst + (size_t)r * c.dst_pitch, (c.w + 3) & ~3u, level);
+        }
+    }
     _mm_sfence(); // non-temporal stores visible before the frame is published
 }
 
@@ -1254,6 +1282,7 @@ static void *convert_main_thread(void *)
             pthread_mutex_lock(&g_job_lock);
             g_jobs_done = 0;
             g_active_jobs = jobs;
+            g_job_brightness = g_brightness;
             g_job_gen++;
             pthread_cond_broadcast(&g_job_cond);
             pthread_mutex_unlock(&g_job_lock);
@@ -1262,7 +1291,8 @@ static void *convert_main_thread(void *)
             while (g_jobs_done < (unsigned)jobs - 1)
                 pthread_cond_wait(&g_job_cond, &g_job_lock);
             pthread_mutex_unlock(&g_job_lock);
-            draw_overlay(w);
+            if (g_job_brightness == 64) // not over a fade
+                draw_overlay(w);
             uint64_t t1 = now_us();
             bench_record(&g_bench.convert, t1 - t0);
             if (d.received_us)
@@ -1740,6 +1770,19 @@ void video_set_paused(bool paused)
     g_pacing.line_valid = false;
     pthread_mutex_unlock(&g_pub_lock);
     LOG("video: %s", paused ? "paused (lobby), frames are no longer decoded" : "resumed, IDR frame requested");
+}
+
+void video_set_brightness(float b)
+{
+    g_brightness = b <= 0.0f ? 0 : b >= 1.0f ? 64 : (int)(b * 64.0f + 0.5f);
+}
+
+bool video_frame_ready()
+{
+    pthread_mutex_lock(&g_pub_lock);
+    const bool ready = g_ready_count > 0;
+    pthread_mutex_unlock(&g_pub_lock);
+    return ready;
 }
 
 void video_set_frame_period(uint32_t period_us)

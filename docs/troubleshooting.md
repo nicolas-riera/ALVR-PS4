@@ -18,7 +18,7 @@
 | The lobby stays although "Connected" | The codec must be H264 (HEVC works too, but decodes more slowly; AV1 does not). Look at the PS4 logs (development build, see [Logs](development.md#logs)) for `video:` lines |
 | Height calibration: "The camera cannot see it there" | The PS Camera does not see the floor where the controller is: step further back from the camera, or use the arm span (T-pose) instead |
 | The lobby shows only the PS Camera, blinking blue and red | The headset tracking has not started: face the PS Camera, within its view. After 10 s with the headset moving, the PS4's "confirm your position" screen opens to help |
-| The floor is a few centimetres off after the PS menu (tracking reset) | The tracking reset can shift the floor slightly: set Your height again or use Calibrate |
+| The floor is a few centimetres off after the PS menu (tracking reset) | The floor is re-anchored on your height after each reset, if you stayed in place during it (the Dev logs say "floor: re-anchored"); otherwise set Your height again or use Calibrate |
 | The system keeps asking to connect the PlayStation VR | The headset is off, or the processor unit's USB or HDMI cable is unplugged; the app waits for it and continues on its own |
 | Stuck in the lobby while the PC is connected ("the game is paused in the lobby") | Hold ✕ (left Move) or ○ (right Move) for 1 s to go back to the game |
 | No sound in the headset | Game audio must be on, and the Windows output device must be at 48 kHz (the PS4 logs say "game audio at … Hz is not supported" otherwise) |

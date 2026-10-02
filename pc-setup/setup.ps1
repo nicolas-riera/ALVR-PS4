@@ -15,6 +15,8 @@
 # A third, ALVR-PS4-Audio-Cable-Toggle.bat, disables the virtual audio cable (VB-Cable or
 # Virtual Audio Cable: an extra speaker and microphone in Windows) together with ALVR's
 # microphone, or enables both again. Only when run by hand: nothing toggles it by itself.
+# It also puts ALVR PS4 Tracking Viewer (a window showing what the PS4 tracks) in the
+# streamer folder (no shortcut).
 #
 # Do not run this file directly: tools/make_release.py embeds it, together with the
 # settings template (alvr-ps4-session.json), into release/ALVR-PS4-Setup.bat, a single double-clickable file. The batch header sets
@@ -32,6 +34,9 @@ $VbCableUrl = "https://download.vb-audio.com/Download_CABLE/VBCABLE_Driver_Pack4
 # "name:base64|name:base64|...") (filled in by tools/make_release.py).
 $TemplateGz = "@@SESSION_TEMPLATE@@"
 $IconsData = "@@ICONS@@"
+# ALVR PS4 Tracking Viewer (companion/, built by tools/build_companion.sh), gzip + base64.
+$ViewerGz = "@@TRACKING_VIEWER@@"
+$ViewerName = "ALVR PS4 Tracking Viewer"
 $StreamerName = "ALVR-PS4_PC-Streamer"
 $ResetBatName = "ALVR-PS4-Reset.bat"
 $TrackerBatName = "ALVR-PS4-Tracker-Mode.bat"
@@ -136,7 +141,7 @@ function Expand-Gz($b64) {
 function HexBytes($hex) { [byte[]]($hex -split '(..)' | Where-Object { $_ } | ForEach-Object { [Convert]::ToByte($_, 16) }) }
 
 function Stop-AlvrAndSteamVr {
-    foreach ($name in @("ALVR Dashboard", "vrmonitor", "vrserver", "vrcompositor", "vrdashboard", "vrwebhelper")) {
+    foreach ($name in @("ALVR Dashboard", "vrmonitor", "vrserver", "vrcompositor", "vrdashboard", "vrwebhelper", $ViewerName)) {
         $p = Get-Process -Name $name -ErrorAction SilentlyContinue
         if ($p) {
             Info "Stopping $name"
@@ -670,6 +675,12 @@ try {
     Info "$ResetBatName reinstalls everything from scratch"
     Info "$TrackerBatName switches the PS Moves to Vive trackers for another headset (and back)"
     Info "$CableBatName disables the virtual audio cable and ALVR's microphone (and back)"
+
+    # --- ALVR PS4 Tracking Viewer ------------------------------------------------------
+    Step "ALVR PS4 Tracking Viewer"
+    $Viewer = Join-Path $Streamer "$ViewerName.exe"
+    [IO.File]::WriteAllBytes($Viewer, [byte[]](Expand-Gz $ViewerGz))
+    Info "$Viewer shows what the PS4 tracks (headset, PS Moves, DualShock 4), and records it"
 
     # --- Shortcut and launch ---------------------------------------------------------
     Step "Desktop shortcut"
