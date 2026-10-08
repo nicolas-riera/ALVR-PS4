@@ -28,9 +28,8 @@ wire format with the app (`client/src/trackview_proto.h`): it sends a hello to U
 `tools/make_release.py` embeds the built .exe (gzip + base64, about 280 KB of the .bat), so
 build it before making a release. Its headset model is drawn by
 `client/src/lobby.cpp` (`draw_headset`); `tools/test/lobby_preview.cpp` mode 11 renders it
-alone through a narrow lens, for comparing with photos of the PS VR. A `.psvrdata` recording is `PSVRDATA`, then four
-u32 (file format version 1, wire version, frame count, duration in ms), then for each frame
-a u32 time in ms, a u16 size and the state packet as it came from the console.
+alone through a narrow lens, for comparing with photos of the PS VR. Its `.psvrdata` recordings are described byte by
+byte in [The .psvrdata recording format](psvrdata-format.md).
 
 `tools/build.sh` expects the toolchain in `~/ps4/OpenOrbis/PS4Toolchain` and a local
 OpenSSL 1.1 in `~/ps4/libssl11` (PkgTool needs it; Debian 13 no longer ships it).

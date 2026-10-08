@@ -29,6 +29,7 @@ normal mode.
 | [Usage](docs/usage.md) | PS Move controls, lobby settings, refresh rate, DualShock 4, Tracking Viewer on the PC |
 | [Troubleshooting](docs/troubleshooting.md) | common problems and their fixes |
 | [Development](docs/development.md) | building, deploying, logs, the source layout, the saved settings |
+| [.psvrdata format](docs/psvrdata-format.md) | the Tracking Viewer's recording files, byte by byte, with a Python reader |
 | [ALVR 20.14.1 protocol](docs/alvr-20.14.1-protocol.md) | the wire protocol, as implemented by the client |
 | [PS VR technical reference](docs/psvr-technical-reference.md) | everything learned about the PSVR and the PS4's VR system: headset, compositor, VR display mode, tracker, PS Move, DualShock 4, dialogs, decoder |
 | [PS4 video decoder](docs/ps4-video-decoder.md) | the system video decoder in depth: API, internals, pipeline depth, measurements, colour conversion and paced display |

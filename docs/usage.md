@@ -209,7 +209,7 @@ The bar at the bottom records what you see and plays it back:
 | slider | Left / Right, Home | move through the recording (5 s back / forward, to the start) |
 
 Recordings are `.psvrdata` files: every tracking state as it came from the PS4, about
-20 KB a second. The camera stays free while a recording plays. Closing the window or
+8 KB a second with two PS Moves ([file format](psvrdata-format.md)). The camera stays free while a recording plays. Closing the window or
 starting another recording asks first if the last one was not saved.
 
 It talks to the ALVR PS4 app over UDP port 9955 and only receives while its window is
