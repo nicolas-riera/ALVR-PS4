@@ -3,7 +3,7 @@
 #   make VARIANT=stable   -> build the stable .pkg (releases only)
 #   make clean
 
-VERSION     := 01.46
+VERSION     := 01.47
 VARIANT     ?= dev
 
 ifeq ($(VARIANT),stable)

@@ -94,7 +94,7 @@ timings. `--list` shows the test plans; the script's header describes every opti
 | `client/src/audio.*` | game audio playback (libSceAudioOut) and microphone capture (libSceAudioIn) |
 | `client/src/hmd.*`, `reproj.*`, `screen.*` | PSVR (libSceHmd), the system reprojection compositor, video output and VR display mode |
 | `client/src/hmd_setup.*` | system dialogs: "connect your PlayStation VR" and "confirm your position" |
-| `client/src/tracker.*`, `camera.*`, `move.*`, `wand.*`, `pad.*`, `hid.*` | camera tracking (libSceVrTracker), PS Move, Vive wand emulation, DualShock 4, raw HID reports |
+| `client/src/tracker.*`, `camera.*`, `move.*`, `move_predict.*`, `wand.*`, `pad.*`, `hid.*` | camera tracking (libSceVrTracker), PS Move, PS Move position while out of view (arm model, glide back), Vive wand emulation (trackpad behaviours), DualShock 4, raw HID reports |
 | `client/src/config.*` | settings stored in the PS4 save data (libSceSaveData) |
 | `client/src/settings.*` | lobby settings panel, first launch height panel and height calibration |
 | `client/src/lobby.*` | software-rendered lobby |

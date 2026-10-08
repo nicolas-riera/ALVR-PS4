@@ -38,6 +38,12 @@ struct ClientConfig {
     int hud;
     // Settings panel opened each time the lobby comes back from the stream (1, default).
     int lobby_settings;
+    // Trackpad behaviour per hand (index 0 left, 1 right; wand.h). pad_swap: 0 (default) =
+    // the Move button touches and TRIANGLE (left) / SQUARE (right) clicks, 1 = the other way
+    // round (the two never do the same). pad_alt_move / pad_alt_other: that button's point
+    // is 0 = Default (drag from the pad centre by rotating the controller) or 1 = Alternate
+    // (where the controller points, relative to the headset).
+    int pad_swap[2], pad_alt_move[2], pad_alt_other[2];
 };
 
 // Reads the settings from the save data (defaults when there is none yet).

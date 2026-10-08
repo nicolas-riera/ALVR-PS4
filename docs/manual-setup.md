@@ -84,8 +84,9 @@ Four behaviours of the ALVR 20.14.1 SteamVR driver cannot be changed by any sett
   shows it as searching, with its grey screen. The same happens right away while the
   headset tracking is not initialized yet (at start, or back from the PS menu).
 * **Controllers "searching".** The driver reports a controller either tracked or
-  disconnected, and drops its buttons while it is not tracked. A PS Move the camera has lost
-  for 10 seconds (or never seen) is sent with the same marker height: the patched driver
+  disconnected, and drops its buttons while it is not tracked. A PS Move that goes
+  searching (lost far from the head or with the headset off for 10 seconds and 80 cm, see
+  [Usage](usage.md), or never seen) is sent with the same marker height: the patched driver
   shows it as searching (hidden) and keeps its buttons working. A PS Move that is switched
   off stays disconnected.
 * **Late controller activation.** When the PS4 connects, the driver gives SteamVR only 1

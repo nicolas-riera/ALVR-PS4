@@ -28,6 +28,7 @@
 #include "config.h"
 #include "move.h"
 #include "pad.h"
+#include "move_predict.h"
 #include "wand.h"
 #include "reproj.h"
 #include "log.h"
@@ -38,7 +39,7 @@
 #include "bench.h"
 #include "trackview.h"
 
-#define ALVR_PS4_VERSION "0.11.1"
+#define ALVR_PS4_VERSION "0.12.0"
 #if ALVR_PS4_DEV
 #define ALVR_PS4_TITLE "ALVR PS4 (Dev)"
 #else
@@ -128,6 +129,9 @@ static int g_user_id = -1;
 static TrackerState g_tracker;
 static MoveController g_moves[MOVE_MAX];
 static WandEmulator g_wand_emu[MOVE_MAX];
+// Position of the playing user's PS Moves while the camera does not see them (arm model,
+// glide back; move_predict.h): what SteamVR, the lobby and the Tracking Viewer get.
+static MovePredict g_move_pred[MOVE_MAX];
 static WandInput g_wand[MOVE_MAX];
 static PadController g_pad; // DualShock 4: lobby only
 // Other logged-in users: their controllers are opened and tracked too (the tracker runs two
@@ -826,7 +830,7 @@ static bool render_video()
     return ok;
 }
 
-// Lobby model of a PS Move (always shown while tracked; the 10 s "searching" state is only
+// Lobby model of a PS Move (always shown while tracked; the "searching" state is only
 // for SteamVR). The emulated trackpad is filled by the caller.
 static void fill_lobby_move(LobbyView::Controller *c, const MoveController &m, char letter)
 {
@@ -889,6 +893,8 @@ static void fill_lobby_controllers(LobbyView *view)
         LobbyView::Controller &c = view->controllers[i];
         const WandInput &w = g_wand[i];
         fill_lobby_move(&c, g_moves[i], move_index_hand(i) == HAND_LEFT ? 'L' : 'R');
+        if (g_move_pred[i].mode != MOVE_PREDICT_NONE)
+            c.pos = g_move_pred[i].out;
         c.pad_touch = w.pad_touch;
         c.pad_click = w.pad_click;
         c.pad_x = w.pad_x;
@@ -1242,6 +1248,72 @@ static void to_stage(const float p[3], const float q[4], AlvrDeviceMotion *m)
     memset(m->angular_velocity, 0, sizeof(m->angular_velocity));
 }
 
+// Once per frame, after the tracker and the controllers are read.
+static void update_move_prediction(uint64_t now)
+{
+    float hp[3], hq[4];
+    head_pose(hp, hq);
+    for (int i = 0; i < MOVE_MAX; i++) {
+        const MoveController &m = g_moves[i];
+        MovePredict &p = g_move_pred[i];
+        if (!m.connected || !m.track.registered) {
+            if (p.mode != MOVE_PREDICT_NONE)
+                move_predict_reset(&p);
+            continue;
+        }
+        const TrackedDevice &t = m.track;
+        MovePredictInput in;
+        in.now_us = now;
+        in.seen = t.position_quality == 9 || t.position_quality == 6;
+        in.has_position = t.has_position;
+        in.position = v3(t.position[0], t.position[1], t.position[2]);
+        in.orientation = Quat{t.orientation[0], t.orientation[1], t.orientation[2], t.orientation[3]};
+        in.velocity = v3(t.velocity[0], t.velocity[1], t.velocity[2]);
+        in.has_accel = true;
+        in.accel = v3(m.accel[0], m.accel[1], m.accel[2]);
+        in.gyro = v3(m.gyro[0], m.gyro[1], m.gyro[2]);
+        in.head_valid = !headset_lost(now);
+        in.head = v3(hp[0], hp[1], hp[2]);
+        in.head_rot = Quat{hq[0], hq[1], hq[2], hq[3]};
+        in.worn = g_headset_worn != 0; // unknown counts as worn
+        const Vec3 before = p.out;
+        move_predict_update(&p, in);
+        const char *hand = move_index_hand(i) == HAND_LEFT ? "L" : "R";
+        if (p.rest_changed)
+            LOG("move %s: %s%s%s (shake %.4f, gyro %.3f rad/s, %s)", hand, p.resting ? "put down" : "picked up",
+                p.resting ? ": " : "", p.resting ? p.rest_reason : "", p.accel_shake,
+                sqrtf(m.gyro[0] * m.gyro[0] + m.gyro[1] * m.gyro[1] + m.gyro[2] * m.gyro[2]),
+                move_predict_mode_name(p.mode));
+        // Dev: the motion sensors once a second while hidden, to tune the rest detection.
+        static uint64_t sensors_log_us[MOVE_MAX];
+        if (p.mode != MOVE_PREDICT_TRACKED && p.mode != MOVE_PREDICT_NONE && now - sensors_log_us[i] >= 1000000) {
+            sensors_log_us[i] = now;
+            LOG("move %s: hidden, %s, shake %.4f, turning %.1f deg/s, accel %.3f %.3f %.3f, gyro %.3f %.3f %.3f", hand,
+                p.resting ? "put down" : "in hand", p.accel_shake, p.rot_rate * 57.2958f, m.accel[0], m.accel[1],
+                m.accel[2], m.gyro[0], m.gyro[1], m.gyro[2]);
+        }
+        if (p.changed_from < 0)
+            continue;
+        const float lost_s = (now - p.lost_us) / 1e6f;
+        if (p.mode == MOVE_PREDICT_INERTIAL && p.changed_from != MOVE_PREDICT_ARM)
+            LOG("move %s: lost %.2f m from the head (%s, headset %s, turning %.1f deg/s%s)", hand, p.lost_head_dist,
+                p.near ? "near: arm model allowed" : "far: plain rule", in.worn ? "worn" : "not worn",
+                p.rot_rate * 57.2958f, p.resting ? ", put down" : "");
+        else if (p.mode == MOVE_PREDICT_ARM)
+            LOG("move %s: arm model after %.1f s (tracker estimate likely %.2f m off)", hand, lost_s, p.static_error);
+        else if (p.mode == MOVE_PREDICT_TRACKED && p.changed_from != MOVE_PREDICT_NONE &&
+                 p.changed_from != MOVE_PREDICT_SEARCHING)
+            LOG("move %s: seen again after %.1f s (%s), gliding %.2f m", hand, lost_s,
+                move_predict_mode_name(p.changed_from),
+                sqrtf((before.x - in.position.x) * (before.x - in.position.x) +
+                      (before.y - in.position.y) * (before.y - in.position.y) +
+                      (before.z - in.position.z) * (before.z - in.position.z)));
+        else
+            LOG("move %s: %s -> %s after %.1f s", hand, move_predict_mode_name(p.changed_from),
+                move_predict_mode_name(p.mode), lost_s);
+    }
+}
+
 static void send_alvr_uplink()
 {
     AlvrDeviceMotion head, hands[2];
@@ -1272,18 +1344,21 @@ static void send_alvr_uplink()
         const MoveController &m = g_moves[i];
         int hand = move_index_hand(i) == HAND_LEFT ? 0 : 1;
         AlvrDeviceMotion &hm = hands[hand];
-        to_stage(m.track.position, m.track.orientation, &hm);
+        const MovePredict &pr = g_move_pred[i];
+        const float pos[3] = {pr.out.x, pr.out.y, pr.out.z};
+        to_stage(pr.mode != MOVE_PREDICT_NONE ? pos : m.track.position, m.track.orientation, &hm);
         // Tracker-space velocities (stage space only shifts y): SteamVR extrapolates the
-        // controllers with them over its own pipeline latency.
-        memcpy(hm.linear_velocity, m.track.velocity, sizeof(hm.linear_velocity));
+        // controllers with them over its own pipeline latency (none under the arm model).
+        const float vel[3] = {pr.velocity.x, pr.velocity.y, pr.velocity.z};
+        memcpy(hm.linear_velocity, pr.mode != MOVE_PREDICT_NONE ? vel : m.track.velocity, sizeof(hm.linear_velocity));
         memcpy(hm.angular_velocity, m.track.angular_velocity, sizeof(hm.angular_velocity));
         // A controller switched on is always sent (omitted = disconnected, inputs dropped).
-        // Lost by the camera it keeps its last pose for 10 s, then (or when never seen) it
-        // is marked searching with a height below -500 m: the patched driver
+        // Lost by the camera it is predicted (move_predict.h); searching (or never seen) it
+        // is marked with a height below -500 m: the patched driver
         // (tools/alvr_driver_patch.py) hides it but keeps its buttons working.
         hm.present = m.connected;
-        if (!m.track.has_position || !m.track.last_seen_us ||
-            now - m.track.last_seen_us > TRACKER_CONTROLLER_SEARCHING_US)
+        if (!m.track.has_position || !m.track.last_seen_us || pr.mode == MOVE_PREDICT_SEARCHING ||
+            pr.mode == MOVE_PREDICT_NONE)
             hm.position[1] = -1000.0f;
         float gauge = 0.0f;
         bool charging = false;
@@ -1712,6 +1787,7 @@ int main()
         move_update(g_moves);
         pad_update(&g_pad);
         const uint64_t now = sceKernelGetProcessTime();
+        update_move_prediction(now);
         poll_other_users(now);
         update_other_users();
         AlvrStatus alvr_st;
@@ -1726,9 +1802,14 @@ int main()
         move_set_vibration_strength(g_config.vibration_percent);
         pad_set_vibration_strength(g_config.vibration_percent);
         video_set_frame_period(g_display_hz == 90 ? 1000000 / 90 : 1000000 / 60);
+        float head_p[3], head_q[4];
+        head_pose(head_p, head_q);
+        const Quat head_rot{head_q[0], head_q[1], head_q[2], head_q[3]};
         for (int i = 0; i < MOVE_MAX; i++) {
             WandInput prev = g_wand_emu[i].last;
-            wand_update(&g_wand_emu[i], move_index_hand(i), g_moves[i], &g_wand[i]);
+            const int h = move_index_hand(i) == HAND_LEFT ? 0 : 1;
+            const WandSettings ws{g_config.pad_swap[h] != 0, g_config.pad_alt_move[h] != 0, g_config.pad_alt_other[h] != 0};
+            wand_update(&g_wand_emu[i], move_index_hand(i), g_moves[i], ws, head_rot, g_tracker.results_ok != 0, &g_wand[i]);
             const WandInput &w = g_wand[i];
             // Lobby haptics feedback, only while the game is not shown (then ALVR drives the
             // motors): a tick on pad click and grip, a longer buzz on a full trigger pull

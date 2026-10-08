@@ -182,6 +182,10 @@ void move_update(MoveController ctl[MOVE_MAX])
                 LOG("move %d: buttons 0x%04x -> 0x%04x", i, c.buttons, d.buttons);
             c.buttons = d.buttons;
             c.trigger = d.trigger;
+            for (int k = 0; k < 3; k++) {
+                c.accel[k] = d.accelerometer[k];
+                c.gyro[k] = d.gyro[k];
+            }
         }
         move_vibration_expire(&c);
         // The sphere is driven by the VR tracker itself (as it does for the headset

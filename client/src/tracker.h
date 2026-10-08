@@ -76,8 +76,8 @@ extern volatile uint32_t g_tracker_controller_prediction_us;
 // motion-to-photon latency while streaming, 0 in the lobby.
 extern volatile uint32_t g_tracker_head_prediction_us;
 
-// Time without camera view after which a device is reported as "searching".
-#define TRACKER_CONTROLLER_SEARCHING_US 10000000ull
+// Time without camera view after which the headset is reported as "searching" (the PS
+// Moves: move_predict.h).
 #define TRACKER_HMD_SEARCHING_US 3000000ull
 
 const char *tracker_status_name(uint32_t status);

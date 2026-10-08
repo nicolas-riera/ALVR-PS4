@@ -29,6 +29,9 @@ struct MoveController {
     float sphere_radius;
     uint16_t buttons; // MoveButton bits
     uint16_t trigger; // 0..255
+    // Raw motion sensors of the latest report (libSceMove units; the accelerometer includes
+    // gravity), read even while the camera does not see the controller.
+    float accel[3], gyro[3];
     uint64_t next_register_us; // tracker registration retry time
     uint8_t vibration;         // current motor intensity
     uint64_t vibration_end_us; // 0 = no timed pulse

@@ -9,6 +9,10 @@
 | Trigger (analog) | T | T |
 | Trackpad touch | hold **MOVE** and tilt the controller (roll = left/right, pitch = up/down); the touch starts at the pad centre | same |
 | Trackpad click | **△** (+ tilt for the position) | **□** (+ tilt) |
+
+These are the default trackpad buttons and behaviour; the settings can swap the touch and
+click buttons of each hand and switch each button to the "Alternate" way (see
+[Trackpad behavior](#lobby-settings) below).
 | Grip | **○** | **✕** |
 | Menu | **□** | **△** |
 | System (SteamVR dashboard) | **START** | **START** |
@@ -43,8 +47,19 @@ centimetres; the floor is now kept under you: your neck height just before the r
 compared with the second after it, and the floor follows the difference (when you stayed
 in place: less than 25 cm sideways and 12 cm up or down).
 
-**Tracking loss:** a Move hidden from the camera keeps its last position. SteamVR shows it
-as "searching" after 10 s. A headset the camera has lost is shown as "searching", with
+**Tracking loss:** a Move hidden from the camera is predicted, like a Quest 2 controller. For
+the first moments it keeps the tracker's own estimate (fast swings out of view behave as
+before). Lost within arm's reach of the head (1 m) with the headset on and the
+controller in hand, it keeps that estimate as long as it is likely right: once your head has
+moved, your body turned or the controller turned enough to have moved the hand by about
+20 cm, an arm model takes over: the elbow stays fixed to your body (it follows your head's
+position, and its turns beyond 35 degrees) and the controller pivots around it with its own
+rotation; it never goes "searching". A controller put down (its motion sensors go still: a hand
+always shakes it a little; or it stays quiet while you walk away from it) goes back to where the tracker's estimate last placed it and never goes
+"searching"; picked up again, the above starts over. Lost further away, or with the headset off, it keeps
+the tracker's position, and SteamVR shows it as "searching" only after 10 s and once it has
+drifted more than 80 cm from where it was lost. Seen again, it glides to its tracked
+position instead of jumping (within a few frames when it moves fast). A headset the camera has lost is shown as "searching", with
 SteamVR's grey screen, after 3 s (needs the [driver patch](manual-setup.md#driver-patches)).
 In the lobby, the surroundings (grid, texts, settings) then fade to black; the PS Camera and
 the controllers stay shown where they are.
@@ -80,6 +95,23 @@ while connected).
 **Vibration:** a slider for the strength of the PS Move (and DualShock 4) vibrations, the
 game's and the lobby's alike: fully right is the full strength (as before), fully left
 ("Off") turns them off. Releasing the slider gives a sample buzz at the new strength.
+
+**Trackpad behavior (left and right):** for each hand, the Move button and the other
+trackpad button (Triangle on the left, Square on the right) each have two settings:
+
+* **Touch / Click:** which of the two touches the trackpad and which clicks it (by default
+  the Move button touches and Triangle / Square clicks). They always differ: changing one
+  changes the other. A click also touches.
+* **Default / Alternate:** how that button places the point on the trackpad. Default: the
+  point starts at the centre and follows the controller's tilt since the press. Alternate
+  (like Rec Room's locomotion): the point is where the controller points, relative to the
+  headset: straight ahead is the top of the pad, left is left, behind is the bottom. As
+  games move you relative to the headset, turning your head while pointing the same way
+  keeps you walking the same way. The point stays at the edge of the pad, except when
+  pointing up: within 40 degrees of straight up it comes in towards the centre (reached
+  pointing straight up). Pointing straight down keeps the last direction.
+
+With both buttons held, the click button's way places the point.
 
 **Performance overlay:** shows, below the centre of the view while playing, the console
 (PS4 or PS4 Pro), the refresh rate and the bitrate received; the frame rate and the latency

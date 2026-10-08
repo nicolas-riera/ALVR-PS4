@@ -89,6 +89,12 @@ static void write_save(const ClientConfig *cfg)
         fprintf(f, "vibration_percent=%d\n", cfg->vibration_percent);
         fprintf(f, "hud=%d\n", cfg->hud);
         fprintf(f, "lobby_settings=%d\n", cfg->lobby_settings);
+        for (int h = 0; h < 2; h++) {
+            const char *side = h ? "right" : "left";
+            fprintf(f, "pad_%s_swap=%d\n", side, cfg->pad_swap[h]);
+            fprintf(f, "pad_%s_alt_move=%d\n", side, cfg->pad_alt_move[h]);
+            fprintf(f, "pad_%s_alt_other=%d\n", side, cfg->pad_alt_other[h]);
+        }
         const bool written = !ferror(f);
         if (fclose(f) != 0 || !written)
             LOG("config: cannot write %s", tmp);
@@ -158,6 +164,20 @@ static int read_save(ClientConfig *cfg)
                 continue;
             if (sscanf(line, "lobby_settings=%d", &cfg->lobby_settings) == 1)
                 continue;
+            for (int h = 0; h < 2; h++) {
+                const char *side = h ? "right" : "left";
+                char key[32];
+                int v;
+                snprintf(key, sizeof(key), "pad_%s_swap=%%d", side);
+                if (sscanf(line, key, &v) == 1)
+                    cfg->pad_swap[h] = v;
+                snprintf(key, sizeof(key), "pad_%s_alt_move=%%d", side);
+                if (sscanf(line, key, &v) == 1)
+                    cfg->pad_alt_move[h] = v;
+                snprintf(key, sizeof(key), "pad_%s_alt_other=%%d", side);
+                if (sscanf(line, key, &v) == 1)
+                    cfg->pad_alt_other[h] = v;
+            }
         }
         fclose(f);
     }
@@ -216,6 +236,14 @@ void config_load(ClientConfig *cfg, int user_id)
         cfg->vibration_percent = 100;
     cfg->hud = cfg->hud != 0;
     cfg->lobby_settings = cfg->lobby_settings != 0;
+    for (int h = 0; h < 2; h++) {
+        cfg->pad_swap[h] = cfg->pad_swap[h] != 0;
+        cfg->pad_alt_move[h] = cfg->pad_alt_move[h] != 0;
+        cfg->pad_alt_other[h] = cfg->pad_alt_other[h] != 0;
+    }
+    LOG("config: trackpad left swap %d alternate move %d other %d, right swap %d alternate move %d other %d",
+        cfg->pad_swap[0], cfg->pad_alt_move[0], cfg->pad_alt_other[0], cfg->pad_swap[1], cfg->pad_alt_move[1],
+        cfg->pad_alt_other[1]);
     if (cfg->hostname[0]) {
         LOG("config: hostname %s, resolution %d%%, %d Hz, headset prediction %d%%, extra controller prediction %d ms, "
             "camera height %d cm, user height %d cm, vibration %d%%, overlay %d (save data of user 0x%x)",
